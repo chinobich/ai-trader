@@ -394,6 +394,7 @@ namespace PhoneBridge
         readonly AutoResetEvent bufferEvent = new AutoResetEvent(false);
         bool useEvent;
         bool started;
+        bool firstPacket = true;
         float[] floatBuf = new float[0];
         short[] shortBuf = new short[0];
         int[] intBuf = new int[0];
@@ -510,7 +511,9 @@ namespace PhoneBridge
                 try
                 {
                     if (dst.Length < total + frames) Array.Resize(ref dst, Math.Max(dst.Length * 2, total + frames));
-                    if ((flags & CoreAudio.BufferFlagsDataDiscontinuity) != 0) Discontinuities++;
+                    // 開始直後の最初のパケットには必ずこの印が付くので数えない。
+                    if ((flags & CoreAudio.BufferFlagsDataDiscontinuity) != 0 && !firstPacket) Discontinuities++;
+                    firstPacket = false;
                     if ((flags & CoreAudio.BufferFlagsSilent) != 0) Array.Clear(dst, total, frames);
                     else ToMono(data, frames, dst, total);
                 }
