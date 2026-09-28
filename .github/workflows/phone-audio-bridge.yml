@@ -62,6 +62,19 @@ jobs:
         shell: cmd
         run: build.bat /nopause
 
+      # 実機と同じく、Windows のプライバシー設定でデスクトップアプリのマイク利用を許可しておく
+      # （許可が無いと録音側が 0x80070005 で拒否される）。
+      - name: Allow desktop apps to use the microphone
+        shell: pwsh
+        run: |
+          $base = 'Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'
+          foreach ($root in 'HKLM:', 'HKCU:') {
+            foreach ($key in "$root\$base", "$root\$base\NonPackaged") {
+              New-Item -Path $key -Force | Out-Null
+              Set-ItemProperty -Path $key -Name Value -Value 'Allow' -Type String
+            }
+          }
+
       - name: Play a tone into CABLE Input and record it back from CABLE Output
         working-directory: phone_audio_bridge
         shell: pwsh
