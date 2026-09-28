@@ -1,0 +1,2 @@
+# Windows のバッチファイルは CRLF のまま扱う
+*.bat -text

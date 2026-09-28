@@ -1,0 +1,7 @@
+PhoneBridge.exe
+*.log
+*.log.old
+PhoneBridge.ini
+PhoneBridge.ini.tmp
+PhoneBridge_*.txt
+recordings/

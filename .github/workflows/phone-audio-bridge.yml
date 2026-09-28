@@ -1,0 +1,72 @@
+name: PhoneBridge
+
+on:
+  push:
+    paths:
+      - 'phone_audio_bridge/**'
+      - '.github/workflows/phone-audio-bridge.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and self test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with the C# compiler bundled with Windows (same as build.bat)
+        working-directory: phone_audio_bridge
+        shell: cmd
+        run: build.bat /nopause
+
+      - name: Self test (audio processing only, no devices needed)
+        working-directory: phone_audio_bridge
+        shell: pwsh
+        run: |
+          $log = Join-Path $PWD 'selftest.log'
+          $p = Start-Process -FilePath .\PhoneBridge.exe -ArgumentList '/selftest', "`"$log`"" -Wait -PassThru
+          Get-Content -Encoding UTF8 $log
+          if ($p.ExitCode -ne 0) { throw "self test failed (exit code $($p.ExitCode))" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $dist = 'dist/PhoneBridge'
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          Copy-Item phone_audio_bridge/PhoneBridge.exe, phone_audio_bridge/README.md, phone_audio_bridge/build.bat $dist
+          Copy-Item -Recurse phone_audio_bridge/src "$dist/src"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhoneBridge
+          path: dist/PhoneBridge
+          if-no-files-found: error
+
+  device-test:
+    name: Device test through VB-CABLE (Windows)
+    runs-on: windows-latest
+    # 仮想オーディオ機器を入れる外部アクションを使うので、配布物を作るジョブとは分け、
+    # ここが失敗しても配布物の作成には影響しないようにしている。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install a virtual audio cable (VB-CABLE)
+        uses: LABSN/sound-ci-helpers@v1
+
+      - name: Build
+        working-directory: phone_audio_bridge
+        shell: cmd
+        run: build.bat /nopause
+
+      - name: Play a tone into CABLE Input and record it back from CABLE Output
+        working-directory: phone_audio_bridge
+        shell: pwsh
+        run: |
+          $log = Join-Path $PWD 'devicetest.log'
+          $p = Start-Process -FilePath .\PhoneBridge.exe -ArgumentList '/devicetest', "`"$log`"" -Wait -PassThru
+          Get-Content -Encoding UTF8 $log
+          if ($p.ExitCode -ne 0) { throw "device test failed (exit code $($p.ExitCode))" }
