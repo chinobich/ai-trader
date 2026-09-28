@@ -326,6 +326,18 @@ namespace PhoneBridge
             AudioDeviceInfo none = AudioDevices.Find(list, "", "存在しない機器");
             Check(byName != null && byName.Id == "id-1" && byId != null && byId.Id == "id-2" && none == null,
                 "device is found again after the USB port changes", null);
+
+            var renders = new List<AudioDeviceInfo>
+            {
+                new AudioDeviceInfo("r-1", "スピーカー (USB Audio Device)", false),
+                new AudioDeviceInfo("r-2", "Speakers (VB-Audio Virtual Cable)", false),
+                new AudioDeviceInfo("r-3", "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)", false)
+            };
+            AudioDeviceInfo plain = AudioDevices.FindVirtualCable(renders, false);
+            renders.Add(new AudioDeviceInfo("r-4", "CABLE Input (VB-Audio Virtual Cable)", false));
+            AudioDeviceInfo preferred = AudioDevices.FindVirtualCable(renders, false);
+            Check(plain != null && plain.Id == "r-2" && preferred != null && preferred.Id == "r-4",
+                "VB-CABLE is recognised under either of its names", null);
         }
 
         static void TestEnumerate()
@@ -357,26 +369,22 @@ namespace PhoneBridge
             {
                 List<AudioDeviceInfo> captures = AudioDevices.List(true);
                 List<AudioDeviceInfo> renders = AudioDevices.List(false);
-                AudioDeviceInfo cableIn = null, cableOut = null;
                 report.AppendLine("capture devices:");
                 foreach (AudioDeviceInfo d in captures)
-                {
                     report.AppendLine("  " + d.Name + "  [" + AudioDevices.DescribeMixFormat(d.Id) + "]");
-                    if (cableOut == null && d.Name.IndexOf("CABLE Output", StringComparison.OrdinalIgnoreCase) >= 0) cableOut = d;
-                }
                 report.AppendLine("render devices:");
                 foreach (AudioDeviceInfo d in renders)
-                {
                     report.AppendLine("  " + d.Name + "  [" + AudioDevices.DescribeMixFormat(d.Id) + "]");
-                    if (cableIn == null && d.Name.IndexOf("CABLE Input", StringComparison.OrdinalIgnoreCase) >= 0) cableIn = d;
-                }
+                AudioDeviceInfo cableIn = AudioDevices.FindVirtualCable(renders, false);
+                AudioDeviceInfo cableOut = AudioDevices.FindVirtualCable(captures, true);
                 if (cableIn == null || cableOut == null)
                 {
-                    report.AppendLine("VB-CABLE (CABLE Input / CABLE Output) was not found. Skipping the loop test.");
+                    report.AppendLine("VB-CABLE was not found. Skipping the loop test.");
                     rc = 2;
                 }
                 else
                 {
+                    report.AppendLine("loop test: " + cableIn.Name + " -> " + cableOut.Name);
                     LoopTest(cableIn, cableOut);
                     rc = failures == 0 ? 0 : 1;
                 }

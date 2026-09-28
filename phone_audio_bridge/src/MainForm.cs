@@ -128,7 +128,8 @@ namespace PhoneBridge
                 ForeColor = SystemColors.GrayText,
                 Text =
                     "・白い箱は「USB Audio Device」などの名前で表示されることが多いです。\n" +
-                    "・AI基盤へ送る先は「CABLE Input (VB-Audio Virtual Cable)」を選びます。\n" +
+                    "・AI基盤へ送る先は「CABLE Input (VB-Audio Virtual Cable)」を選びます\n" +
+                    "　（「スピーカー (VB-Audio Virtual Cable)」という名前のこともあります）。\n" +
                     "　AI基盤（仮想ブラウザ）側では、マイクに「CABLE Output」を選んでください。\n" +
                     "・どれが白い箱か分からないときは、開始して「通話」タブのメーターで確認できます\n" +
                     "　（ヘッドセットに話すと「自分の声」、通話中の相手が話すと「相手の声」が動きます）。\n" +
@@ -347,14 +348,11 @@ namespace PhoneBridge
             string aiId = settings.AiOutId, aiName = settings.AiOutName;
             if (settings.IsNew && aiId.Length == 0 && aiName.Length == 0)
             {
-                foreach (AudioDeviceInfo d in renders)
+                AudioDeviceInfo cable = AudioDevices.FindVirtualCable(renders, false);
+                if (cable != null)
                 {
-                    if (d.Name.IndexOf("CABLE Input", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        aiId = d.Id;
-                        aiName = d.Name;
-                        break;
-                    }
+                    aiId = cable.Id;
+                    aiName = cable.Name;
                 }
             }
 

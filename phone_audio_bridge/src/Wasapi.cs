@@ -330,6 +330,20 @@ namespace PhoneBridge
             return null;
         }
 
+        /// <summary>
+        /// VB-CABLE の機器を探す。通常は「CABLE Input / CABLE Output (VB-Audio Virtual Cable)」だが、
+        /// ドライバの版によっては「Speakers (VB-Audio Virtual Cable)」などの名前になる。
+        /// </summary>
+        public static AudioDeviceInfo FindVirtualCable(List<AudioDeviceInfo> list, bool capture)
+        {
+            string preferred = capture ? "CABLE Output" : "CABLE Input";
+            foreach (var d in list)
+                if (d.Name.IndexOf(preferred, StringComparison.OrdinalIgnoreCase) >= 0) return d;
+            foreach (var d in list)
+                if (d.Name.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0) return d;
+            return null;
+        }
+
         static readonly Regex InstanceNumber = new Regex(@"\(\d+- ", RegexOptions.Compiled);
 
         public static string NormalizeName(string name)
