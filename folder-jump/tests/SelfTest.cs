@@ -26,6 +26,7 @@ namespace FolderJump
             {
                 TestTextNorm();
                 TestQueryParse();
+                TestFiltersAndSynonyms();
                 TestPathUtil();
                 TestSettings(tmp);
                 TestScanAndSearch(tmp);
@@ -88,7 +89,7 @@ namespace FolderJump
             Check(!PathUtil.IsUnder(@"\\srv\share2", @"\\srv\share"), "IsUnder: 似た名前は別");
             Check(PathUtil.IsUnder(@"Z:\a\b", @"Z:\"), "IsUnder: ドライブ直下");
             Check(PathUtil.Pretty(@"\\srv\share\営業", 90) == "srv  ›  share  ›  営業", "表示用パス");
-            Check(QueryEngine.Highlight("見積書_2024.xlsx", TextNorm.Key("見積書_2024.xlsx"), new[] { "見積", "2024" }).SequenceEqual(new[] { 0, 2, 4, 4 }), "ハイライト範囲");
+            Check(QueryEngine.Highlight("見積書_2024.xlsx", TextNorm.Key("見積書_2024.xlsx"), new[] { new[] { "見積" }, new[] { "2024" } }).SequenceEqual(new[] { 0, 2, 4, 4 }), "ハイライト範囲");
         }
 
         static void TestSettings(string tmp)
@@ -98,6 +99,7 @@ namespace FolderJump
             s.Roots.Add(@"\\fileserver\共有");
             s.Roots.Add(@"Z:\");
             s.Exclude.AddRange(Settings.DefaultExclude);
+            s.SynonymLines.AddRange(Synonyms.Defaults);
             s.Hotkey = "Ctrl+Shift+J";
             s.ScanThreads = 4;
             string file = Path.Combine(tmp, "t.ini");
@@ -107,6 +109,19 @@ namespace FolderJump
             Check(r.Hotkey == "Ctrl+Shift+J" && r.ScanThreads == 4, "General を保存/読み込み");
             Check(r.Exclude.Contains("#recycle"), "# で始まる除外名もコメント扱いしない");
             Check(r.ScanSignature == s.ScanSignature, "同じ設定なら同じシグネチャ");
+            Check(r.SynonymLines.Count == Synonyms.Defaults.Length && r.Theme == "dark" && r.Zoom == 100, "辞書と見た目の既定値");
+            s.Theme = "light"; s.Accent = "#FF8800"; s.Zoom = 120; s.Compact = true; s.SaveDialogJump = false;
+            s.SynonymLines.Add("稟議, りんぎ, 決裁");
+            s.Save(file);
+            r = Settings.Load(file);
+            Check(r.Theme == "light" && r.Accent == "#FF8800" && r.Zoom == 120 && r.Compact && !r.SaveDialogJump, "見た目の保存/読み込み");
+            Check(r.SynonymLines.Count == Synonyms.Defaults.Length + 1 && r.Synonyms.Expand("決裁").Length == 3, "辞書の保存/読み込み");
+            Check(!r.Set("zoom", "999") || r.Zoom == 160, "範囲外の値は丸める");
+            Check(!r.Set("nosuchkey", "1"), "知らないキーは false");
+            string old = Path.Combine(tmp, "old.ini");
+            File.WriteAllText(old, "[General]\nHotkey = Alt+Q\n[Roots]\nZ:\\\n");
+            r = Settings.Load(old);
+            Check(r.Hotkey == "Alt+Q" && r.SynonymLines.Count == Synonyms.Defaults.Length && r.Exclude.Count > 0, "以前の設定ファイルでも既定の辞書を使う");
         }
 
         sealed class FakeHost : ICommandHost
@@ -123,6 +138,9 @@ namespace FolderJump
             public void ToggleStartup() { }
             public void ClearHistory() { }
             public void Quit() { }
+            public string LastQuery;
+            public void SetQueryText(string text) { LastQuery = text; }
+            public void ChangeSetting(string key, string value) { S = S.Clone(); S.Set(key, value); }
         }
 
         static void Touch(string root, string rel)
@@ -160,6 +178,7 @@ namespace FolderJump
             var settings = new Settings();
             settings.Roots.Add(root);
             settings.Exclude.AddRange(Settings.DefaultExclude);
+            settings.SynonymLines.AddRange(Synonyms.Defaults);
             settings.ScanThreads = 4;
             var job = new ScanJob(settings);
             FileIndex idx = null;
@@ -199,6 +218,39 @@ namespace FolderJump
 
             r = engine.Compute("見積 -旧", -1, idx, ct);
             Check(!r.Any(x => x.Title == "見積書_旧版.xlsx"), "-旧 で除外");
+
+            r = engine.Compute("見積もり", -1, idx, ct);
+            Check(r.Any(x => x.Title == "見積書_北斗工業.xlsx") && r.Any(x => x.Title == "見積"), "表記ゆれ: 見積もり で 見積 も見つかる");
+
+            r = engine.Compute("令和6 見積書", -1, idx, ct);
+            Check(r.Any(x => x.Title == "見積書_青葉商事_2024-05.xlsx"), "和暦: 令和6 で 2024 も見つかる");
+
+            r = engine.Compute("青葉 .pdf", -1, idx, ct);
+            Check(r.Count == 1 && r[0].Title == "請求書_青葉商事.pdf", "拡張子で絞り込み");
+            r = engine.Compute(".xls", -1, idx, ct);
+            Check(r.Count == 5 && r.All(x => x.Title.EndsWith(".xlsx")), "キーワードなしで拡張子だけ (.xls で .xlsx も): " + r.Count);
+            r = engine.Compute("見積/", -1, idx, ct);
+            Check(r.Count == 2 && r.All(x => x.IsDir), "末尾 / でフォルダだけ");
+            r = engine.Compute("@今日", -1, idx, ct);
+            Check(r.Count > 5 && r.All(x => x.Kind == ItemKind.Entry && x.Path != root), "@今日 (今作ったファイル) ・ルートは出さない: " + r.Count);
+            r = engine.Compute("@2019", -1, idx, ct);
+            Check(r.Count == 0, "@2019 には何もない");
+            r = engine.Compute("見積", -1, idx, ct, true);
+            Check(r.Count > 0 && r[0].IsDir, "保存ダイアログからはフォルダ優先");
+
+            r = engine.Compute("?", -1, idx, ct);
+            Check(r.Count > 5 && r.All(x => x.Kind == ItemKind.Command), "? で書き方の一覧");
+            r[1].Command();
+            Check(host.LastQuery == "見積 .xlsx", "例を選ぶと入力される");
+            r = engine.Compute(">見た目", -1, idx, ct);
+            Check(r.Count > 10 && r.Any(x => x.Title == "テーマ: ダーク" && x.Badge == "使用中"), ">見た目 で設定の一覧 (使用中の表示)");
+            r.First(x => x.Title == "テーマ: ライト").Command();
+            Check(host.S.Theme == "light", "コマンドから設定を変更");
+            r = engine.Compute(">", -1, idx, ct);
+            Check(!r.Any(x => x.Title.StartsWith("テーマ")), "> だけでは見た目の細かい項目は出さない");
+            r = engine.Compute(">設定", -1, idx, ct);
+            Check(r.Count <= 3 && r[0].Title == "設定ファイルを開く" && !r.Any(x => x.Title.StartsWith("アクセント色")),
+                ">設定 は「設定ファイルを開く」が先頭で、見た目の項目がまとめて混ざらない: " + string.Join(" / ", r.Select(x => x.Title)));
 
             r = engine.Compute("みつもり", -1, idx, ct);
             Check(r.Any(x => x.Title == "ミツモリ参考"), "ひらがなでカタカナの名前に一致");
@@ -268,6 +320,61 @@ namespace FolderJump
             Check(usage2.TopHistory(5).Any(e => e.Path == oldPath && e.Count == 5) && usage2.Pins().Count == 1, "履歴とピンの保存/読み込み");
         }
 
+        static void TestFiltersAndSynonyms()
+        {
+            Console.WriteLine("[絞り込み・表記ゆれ]");
+            var now = new DateTime(2026, 10, 24, 15, 0, 0); // 土曜日
+            Query q = Query.Parse("見積 .xlsx .pdf @今週", null, now);
+            Check(q.Terms.Length == 1 && q.Exts.Length == 2 && q.Exts[0] == "xlsx", "拡張子の指定");
+            Check(q.MinTime == new DateTime(2026, 10, 19).ToUniversalTime().ToFileTimeUtc() && q.MaxTime == 0, "@今週 は月曜から");
+            Check(q.Describe() == ".xlsx .pdf  ·  今週", "絞り込みの説明: " + q.Describe());
+            q = Query.Parse("営業/ 2024", null, now);
+            Check(q.Kind == Query.KindFolders && q.Terms.Length == 2, "末尾 / でフォルダだけ");
+            q = Query.Parse("/", null, now);
+            Check(q.Kind == Query.KindFolders && q.Terms.Length == 0 && !q.IsEmpty, "/ だけでもフォルダの絞り込み");
+            q = Query.Parse("契約 .*", null, now);
+            Check(q.Kind == Query.KindFiles, ".* でファイルだけ");
+            q = Query.Parse("＠先月", null, now);
+            Check(q.MinTime == new DateTime(2026, 9, 1).ToUniversalTime().ToFileTimeUtc()
+                && q.MaxTime == new DateTime(2026, 10, 1).ToUniversalTime().ToFileTimeUtc(), "全角の ＠先月");
+            q = Query.Parse("@2024年度", null, now);
+            Check(q.MinTime == new DateTime(2024, 4, 1).ToUniversalTime().ToFileTimeUtc()
+                && q.MaxTime == new DateTime(2025, 4, 1).ToUniversalTime().ToFileTimeUtc() && q.DateLabel == "2024年度", "@2024年度 は 4 月始まり");
+            q = Query.Parse("@r6", null, now);
+            Check(q.DateLabel == "2024年", "@r6 は 2024 年");
+            q = Query.Parse("@2024-05-12", null, now);
+            Check(q.DateLabel == "2024/5/12", "@年-月-日");
+            q = Query.Parse("@202405以降", null, now);
+            Check(q.MaxTime == 0 && q.DateLabel == "2024年5月 以降", "@年月以降");
+            q = Query.Parse("@7日", null, now);
+            Check(q.MinTime == now.AddDays(-7).ToUniversalTime().ToFileTimeUtc() && q.DateLabel == "直近7日", "@7日");
+            q = Query.Parse("@3ヶ月", null, now);
+            Check(q.DateLabel == "直近3か月", "@3ヶ月");
+            q = Query.Parse("@11月", null, now);
+            Check(q.DateLabel == "2025年11月", "まだ来ていない月は去年");
+            q = Query.Parse("@あした", null, now);
+            Check(q.Terms.Length == 1 && q.Terms[0] == "@あした" && !q.HasFilters, "読めない @ は普通の検索語");
+
+            var syn = new Synonyms(Synonyms.Defaults, true);
+            string[] a = syn.Expand(TextNorm.Key("見積もり"));
+            Check(a.Length == 1 && a[0] == "見積", "見積もり → 見積 (短い方に集約): " + string.Join(",", a));
+            a = syn.Expand(TextNorm.Key("打ち合わせ"));
+            Check(Array.IndexOf(a, "打合せ") >= 0 && Array.IndexOf(a, "mtg") >= 0, "打ち合わせ → 打合せ, MTG");
+            a = syn.Expand("2024");
+            Check(Array.IndexOf(a, "令和6") >= 0 && Array.IndexOf(a, "r6") >= 0 && Array.IndexOf(a, "r06") >= 0, "2024 → 令和6, r6, r06");
+            a = syn.Expand(TextNorm.Key("R6年度"));
+            Check(Array.IndexOf(a, "2024年度") >= 0, "R6年度 → 2024年度");
+            a = syn.Expand("2019");
+            Check(Array.IndexOf(a, "令和元") >= 0 && Array.IndexOf(a, "h31") >= 0, "2019 → 令和元, 平成31");
+            a = syn.Expand(TextNorm.Key("サーバー"));
+            Check(a.Length == 1 && a[0] == TextNorm.Key("サーバ"), "長音: サーバー → サーバ");
+            a = syn.Expand("20240611");
+            Check(a.Length == 1, "日付の数字は和暦に広げない");
+            var custom = new Synonyms(new[] { "稟議, りんぎ, 決裁" }, false);
+            Check(custom.Expand("決裁").Length == 3 && custom.Expand("2024").Length == 1, "自分で足した辞書 / 和暦オフ");
+            Check(new Synonyms(new[] { "ひとつだけ" }, false).GroupCount == 0, "1 語だけの行は無視");
+        }
+
         static void TestPerformance()
         {
             Console.WriteLine("[Performance]");
@@ -306,10 +413,11 @@ namespace FolderJump
             var boost = new Dictionary<int, double>();
             var sw = Stopwatch.StartNew();
             List<SearchHit> hits = null;
-            for (int i = 0; i < 5; i++) hits = idx.Search(Query.Parse("見積 青葉 2024"), -1, boost, 80, CancellationToken.None);
+            Query perfQuery = Query.Parse("見積もり 青葉 2024", new Synonyms(Synonyms.Defaults, true), DateTime.Now); // 辞書・和暦あり
+            for (int i = 0; i < 5; i++) hits = idx.Search(perfQuery, -1, boost, 80, CancellationToken.None);
             sw.Stop();
             double ms = sw.Elapsed.TotalMilliseconds / 5;
-            Console.WriteLine("  info " + count.ToString("N0") + " 件で 3 語検索: " + ms.ToString("F1") + " ms / 回, " + hits.Count + " 件ヒット");
+            Console.WriteLine("  info " + count.ToString("N0") + " 件で 3 語検索 (表記ゆれ・和暦あり): " + ms.ToString("F1") + " ms / 回, " + hits.Count + " 件ヒット");
             Check(hits.Count == 80, "上位 80 件を返す");
             Check(ms < 1500, "100 万件規模でも実用的な速さ");
             bool sorted = true;

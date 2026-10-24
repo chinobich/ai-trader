@@ -14,8 +14,8 @@ using System.Windows.Threading;
 [assembly: AssemblyTitle("FolderJump")]
 [assembly: AssemblyProduct("FolderJump")]
 [assembly: AssemblyDescription("ファイルサーバーのフォルダに一瞬でジャンプするランチャー")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 [assembly: TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
 
 namespace FolderJump
@@ -137,10 +137,10 @@ namespace FolderJump
             AppPaths.Ensure();
             bool firstRun = !File.Exists(AppPaths.SettingsFile);
             config = Settings.Load(AppPaths.SettingsFile);
-            if (firstRun) TrySave(config);
+            if (firstRun || NeedsUpgrade(AppPaths.SettingsFile)) TrySave(config); // 新しい項目を設定ファイルに書き足す
             Usage.Load();
 
-            window = new LauncherWindow(this);
+            window = new LauncherWindow(this, Theme.From(config));
             IntPtr hwnd = new WindowInteropHelper(window).EnsureHandle();
             hwndSource = HwndSource.FromHwnd(hwnd);
             hwndSource.AddHook(WndProc);
@@ -157,7 +157,9 @@ namespace FolderJump
             UpdateStatus();
 
             LoadIndexAsync();
-            if (!startHidden) window.ShowLauncher(IntPtr.Zero);
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged += (s2, e2) =>
+                Dispatcher.BeginInvoke(new Action(ApplyAppearance)); // Windows のテーマやアクセント色の変更に追従
+            if (!startHidden) window.ShowLauncher(IntPtr.Zero, IntPtr.Zero);
             if (firstRun) Notify("FolderJump を起動しました", config.Hotkey + " でいつでも呼び出せます。タスクトレイに常駐します。");
         }
 
@@ -177,7 +179,10 @@ namespace FolderJump
                 else
                 {
                     IntPtr fg = Native.GetForegroundWindow();
-                    window.ShowLauncher(ExplorerBridge.IsExplorerWindow(fg) ? fg : IntPtr.Zero);
+                    if (config.SaveDialogJump && FileDialogBridge.IsFileDialog(fg))
+                        window.ShowLauncher(IntPtr.Zero, fg); // 「名前を付けて保存」などの画面から呼ばれた
+                    else
+                        window.ShowLauncher(ExplorerBridge.IsExplorerWindow(fg) ? fg : IntPtr.Zero, IntPtr.Zero);
                 }
             }
             return IntPtr.Zero;
@@ -218,16 +223,16 @@ namespace FolderJump
             tray.Icon = LoadTrayIcon();
             tray.Text = Clip("FolderJump  (" + config.Hotkey + ")", 63);
             var menu = new System.Windows.Forms.ContextMenuStrip();
-            menu.Items.Add("開く", null, delegate { window.ShowLauncher(IntPtr.Zero); });
+            menu.Items.Add("開く", null, delegate { window.ShowLauncher(IntPtr.Zero, IntPtr.Zero); });
             menu.Items.Add("今すぐ再スキャン", null, delegate { Rescan(); });
-            menu.Items.Add("フォルダを検索対象に追加…", null, delegate { window.ShowLauncher(IntPtr.Zero); PickRootFolder(); });
+            menu.Items.Add("フォルダを検索対象に追加…", null, delegate { window.ShowLauncher(IntPtr.Zero, IntPtr.Zero); PickRootFolder(); });
             menu.Items.Add("設定ファイルを開く", null, delegate { OpenSettingsFile(); });
             menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
             menu.Items.Add("終了", null, delegate { Quit(); });
             tray.ContextMenuStrip = menu;
             tray.MouseClick += (s, e) =>
             {
-                if (e.Button == System.Windows.Forms.MouseButtons.Left) window.ShowLauncher(IntPtr.Zero);
+                if (e.Button == System.Windows.Forms.MouseButtons.Left) window.ShowLauncher(IntPtr.Zero, IntPtr.Zero);
             };
             tray.Visible = true;
         }
@@ -269,7 +274,7 @@ namespace FolderJump
                 while (true)
                 {
                     showEvent.WaitOne();
-                    Dispatcher.BeginInvoke(new Action(() => window.ShowLauncher(IntPtr.Zero)));
+                    Dispatcher.BeginInvoke(new Action(() => window.ShowLauncher(IntPtr.Zero, IntPtr.Zero)));
                 }
             });
             t.IsBackground = true;
@@ -381,7 +386,7 @@ namespace FolderJump
         // 開く
         // ------------------------------------------------------------------
 
-        public async void OpenItem(ResultItem item, OpenMode mode, IntPtr previousExplorer)
+        public async void OpenItem(ResultItem item, OpenMode mode, IntPtr previousExplorer, IntPtr previousDialog)
         {
             string path = item.Path;
             if (string.IsNullOrEmpty(path)) return;
@@ -393,6 +398,19 @@ namespace FolderJump
                 return;
             }
             bool isDir = kind == 2;
+            if (previousDialog != IntPtr.Zero && mode == OpenMode.Open)
+            {
+                // 保存/開くダイアログをそのフォルダへ移動 (ファイルを選んだときはその場所へ)
+                string folder = isDir ? path : PathUtil.Parent(path);
+                if (folder == null) return;
+                Usage.Record(folder, true);
+                bool moved = false;
+                try { moved = await FileDialogBridge.NavigateAsync(previousDialog, folder, isDir ? null : PathUtil.LastSegment(path)); }
+                catch (Exception ex) { Log.Error("file dialog", ex); }
+                if (!moved)
+                    Notify("保存画面を移動できませんでした", "画面が閉じられたか、対応していない種類の画面です。Ctrl+Enter でエクスプローラーで開けます。");
+                return;
+            }
             Usage.Record(path, isDir);
             lastOpenedPath = PathUtil.Trim(path);
             lastOpenedUtc = DateTime.UtcNow;
@@ -507,6 +525,7 @@ namespace FolderJump
             }
             Settings old = config;
             config = s;
+            ApplyAppearance();
             if (!string.Equals(old.Hotkey, s.Hotkey, StringComparison.OrdinalIgnoreCase)) RegisterHotkey();
             if (old.LearnFromExplorer != s.LearnFromExplorer) ApplyWatcher();
             if (old.ScanSignature != s.ScanSignature)
@@ -515,6 +534,28 @@ namespace FolderJump
                 window.Toast("設定を反映しました。インデックスを作り直しています…");
             }
             UpdateStatus();
+        }
+
+        void ApplyAppearance()
+        {
+            if (window == null) return;
+            try { window.ApplyTheme(Theme.From(config)); }
+            catch (Exception ex) { Log.Error("theme", ex); }
+        }
+
+        /// <summary>以前のバージョンで作った設定ファイルには新しい項目がないので書き足す。</summary>
+        static bool NeedsUpgrade(string file)
+        {
+            try
+            {
+                string text = File.ReadAllText(file);
+                return text.IndexOf("[Synonyms]", StringComparison.OrdinalIgnoreCase) < 0
+                    || text.IndexOf("[Appearance]", StringComparison.OrdinalIgnoreCase) < 0;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         bool TrySave(Settings s)
@@ -642,6 +683,21 @@ namespace FolderJump
         static void SetProp(object o, string name, object value)
         {
             o.GetType().InvokeMember(name, BindingFlags.SetProperty, null, o, new[] { value });
+        }
+
+        public void SetQueryText(string text)
+        {
+            window.SetQuery(text);
+        }
+
+        /// <summary>コマンド (「>見た目」など) から設定を 1 つ変えて保存し、すぐ反映する。</summary>
+        public void ChangeSetting(string key, string value)
+        {
+            Settings s = config.Clone();
+            if (!s.Set(key, value)) return;
+            config = s;
+            TrySave(s);
+            ApplyAppearance();
         }
 
         public void ClearHistory()

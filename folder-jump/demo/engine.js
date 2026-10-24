@@ -29,22 +29,248 @@
       .replace(/〜/g, '~');
   }
 
-  function parseQuery(text) {
-    var q = { terms: [], excludes: [] };
-    if (!text) return q;
-    var parts = normKey(text).split(/[\s\\\/　]+/);
-    for (var i = 0; i < parts.length; i++) {
-      var raw = parts[i];
-      if (!raw) continue;
-      if (raw.length > 1 && raw[0] === '-') {
-        var e = raw.slice(1);
-        if (q.excludes.indexOf(e) < 0) q.excludes.push(e);
-      } else if (raw !== '-' && q.terms.indexOf(raw) < 0) {
-        q.terms.push(raw);
+  // ------------------------------------------------------------------
+  // 表記ゆれ辞書 (Windows 版 Synonyms.cs と同じ)
+  // ------------------------------------------------------------------
+  var DEFAULT_SYNONYMS = [
+    '見積, 見積り, 見積もり, お見積, 御見積',
+    '打合せ, 打ち合わせ, 打合わせ, 打ち合せ, ミーティング, MTG',
+    '問合せ, 問い合わせ, 問合わせ, 問い合せ',
+    '申込, 申し込み, 申込み',
+    '引継ぎ, 引き継ぎ, 引継',
+    '取扱, 取り扱い, 取扱い',
+    '振込, 振り込み, 振込み',
+    '受付, 受け付け, 受付け',
+    '売上, 売り上げ, 売上げ',
+    '株式会社, (株)',
+    '有限会社, (有)',
+    '議事録, 会議録, 議事メモ',
+    '請求, インボイス, invoice',
+    'マニュアル, 手順書, 手引き',
+    'ヶ月, ケ月, か月, カ月, ヵ月, 箇月'
+  ];
+
+  function Synonyms(lines, era) {
+    this.groups = [];
+    this.era = era !== false;
+    var self = this;
+    (lines || []).forEach(function (line) {
+      var words = [];
+      line.split(/[,、，\s　]+/).forEach(function (raw) {
+        var w = normKey(raw.trim());
+        if (w && words.indexOf(w) < 0) words.push(w);
+      });
+      if (words.length < 2) return;
+      words.sort(function (a, b) { return b.length - a.length; });
+      self.groups.push(words);
+    });
+  }
+
+  Synonyms.prototype.expand = function (term) {
+    var set = [term];
+    var add = function (s) { if (s && set.indexOf(s) < 0) set.push(s); };
+    this.groups.forEach(function (g) {
+      for (var i = 0; i < g.length; i++) {
+        var w = g[i];
+        if (term.indexOf(w) < 0) continue;
+        g.forEach(function (o) { if (o !== w) add(term.split(w).join(o)); });
+        break;
       }
-      if (q.terms.length >= 20) break;
+    });
+    if (this.era) eraAlternatives(term).forEach(add);
+    var n = set.length;
+    for (var k = 0; k < n; k++) add(dropLongVowels(set[k]));
+    return prune(set);
+  };
+
+  function prune(set) {
+    set.sort(function (a, b) { return a.length - b.length || (a < b ? -1 : a > b ? 1 : 0); });
+    var kept = [];
+    set.forEach(function (s) {
+      if (!kept.some(function (k) { return s.indexOf(k) >= 0; })) kept.push(s);
+    });
+    return kept;
+  }
+
+  function isKana(c) {
+    return (c >= 'ぁ' && c <= 'ゟ') || (c >= '゠' && c <= 'ヿ');
+  }
+
+  function dropLongVowels(s) {
+    if (s.indexOf('ー') < 0) return '';
+    var out = '';
+    for (var i = 0; i < s.length; i++) {
+      var c = s[i];
+      if (c === 'ー' && i > 0 && isKana(s[i - 1]) && (i + 1 === s.length || !isKana(s[i + 1]))) continue;
+      out += c;
     }
+    return out === s ? '' : out;
+  }
+
+  function eraNames(y) {
+    var names = [];
+    if (y >= 2019 && y <= 2099) {
+      var n = y - 2018;
+      if (n === 1) names.push('令和元');
+      names.push('令和' + n, 'r' + n);
+      if (n < 10) names.push('r0' + n);
+    }
+    if (y >= 1989 && y <= 2019) {
+      var h = y - 1988;
+      if (h === 1) names.push('平成元');
+      names.push('平成' + h, 'h' + h);
+      if (h < 10) names.push('h0' + h);
+    }
+    return names;
+  }
+
+  /** 2024 → 令和6 / r6 / r06、令和6 → 2024 … */
+  function eraAlternatives(term) {
+    var m = /^(\d{4})(\D.*)?$/.exec(term);
+    if (m) return eraNames(+m[1]).map(function (e) { return e + (m[2] || ''); });
+    m = /^(令和|r|平成|h)(元|\d{1,2})(\D.*)?$/.exec(term);
+    if (!m) return [];
+    var n = m[2] === '元' ? 1 : +m[2];
+    var reiwa = m[1] === '令和' || m[1] === 'r';
+    if (n < 1 || (!reiwa && n > 31)) return [];
+    var y = (reiwa ? 2018 : 1988) + n, rest = m[3] || '';
+    return [y + rest].concat(eraNames(y).map(function (e) { return e + rest; }));
+  }
+
+  // ------------------------------------------------------------------
+  // 検索語 (Windows 版 Query.cs と同じ書き方)
+  //   見積 2024 / -旧 / .xlsx / .* / 営業/ / @今週 @7日 @2024-05 @2024年度 @r6 @2024以降
+  // ------------------------------------------------------------------
+  var KIND_ALL = 0, KIND_FOLDERS = 1, KIND_FILES = 2;
+
+  function Query() {
+    this.terms = []; this.alts = []; this.excludes = []; this.exts = [];
+    this.kind = KIND_ALL; this.minTime = 0; this.maxTime = 0; this.preferFolders = false; this.dateLabel = null;
+  }
+  Query.prototype.hasFilters = function () { return this.exts.length > 0 || this.kind !== KIND_ALL || this.minTime > 0 || this.maxTime > 0; };
+  Query.prototype.isEmpty = function () { return this.terms.length === 0 && !this.hasFilters(); };
+  Query.prototype.describe = function () {
+    var parts = [];
+    if (this.kind === KIND_FOLDERS) parts.push('フォルダのみ');
+    else if (this.kind === KIND_FILES && this.exts.length === 0) parts.push('ファイルのみ');
+    if (this.exts.length > 0) parts.push('.' + this.exts.join(' .'));
+    if (this.dateLabel) parts.push(this.dateLabel);
+    return parts.join('  ·  ');
+  };
+
+  function parseQuery(text, synonyms, now) {
+    var q = new Query();
+    if (!text) return q;
+    now = now || new Date();
+    var terms = [], excl = [], exts = [];
+    var toks = normKey(text).split(/[ \t　]+/);
+    for (var i = 0; i < toks.length; i++) {
+      var tok = toks[i];
+      if (!tok || tok === '-') continue;
+      if (tok === '/' || tok === '\\') { q.kind = KIND_FOLDERS; continue; }
+      if (tok.length > 1 && tok[0] === '@' && tryDate(q, tok.slice(1), now)) continue;
+      if (/^\.([a-z0-9]{1,10}|\*)$/.test(tok)) {
+        var e = tok.slice(1);
+        if (e === '*') q.kind = KIND_FILES;
+        else if (exts.indexOf(e) < 0) exts.push(e);
+        continue;
+      }
+      var body = tok, exclude = body.length > 1 && body[0] === '-';
+      if (exclude) body = body.slice(1);
+      var last = body[body.length - 1];
+      if (!exclude && body.length > 1 && (last === '/' || last === '\\')) q.kind = KIND_FOLDERS;
+      body.split(/[\\\/]+/).forEach(function (part) {
+        var target = exclude ? excl : terms;
+        if (part && target.indexOf(part) < 0) target.push(part);
+      });
+      if (terms.length >= 20) break;
+    }
+    if (exts.length > 0 && q.kind === KIND_FOLDERS) q.kind = KIND_ALL;
+    q.terms = terms;
+    q.exts = exts;
+    q.alts = terms.map(function (t) { return synonyms ? synonyms.expand(t) : [t]; });
+    excl.forEach(function (e) {
+      (synonyms ? synonyms.expand(e) : [e]).forEach(function (a) { if (q.excludes.indexOf(a) < 0) q.excludes.push(a); });
+    });
     return q;
+  }
+
+  function ymd(y, m, d) { return new Date(y, m - 1, d); }
+  function addDays(dt, n) { return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate() + n, dt.getHours(), dt.getMinutes(), dt.getSeconds()); }
+  function addMonths(dt, n) {
+    var y = dt.getFullYear(), m = dt.getMonth() + n;
+    var last = new Date(y, m + 1, 0).getDate();
+    return new Date(y, m, Math.min(dt.getDate(), last), dt.getHours(), dt.getMinutes(), dt.getSeconds());
+  }
+
+  function tryDate(q, s, now) {
+    var openEnd = false, openStart = false, m;
+    if ((m = /^(.+?)(以降|から|以後)$/.exec(s))) { openEnd = true; s = m[1]; }
+    else if ((m = /^(.+?)(以前|まで)$/.exec(s))) { openStart = true; s = m[1]; }
+    var r = resolveDate(s, now);
+    if (!r) return false;
+    if (openEnd) { r.to = null; r.label += ' 以降'; }
+    if (openStart) { r.from = null; r.label += ' 以前'; }
+    var min = r.from ? r.from.getTime() : 0, max = r.to ? r.to.getTime() : 0;
+    if (min > q.minTime) q.minTime = min;
+    if (max > 0 && (q.maxTime === 0 || max < q.maxTime)) q.maxTime = max;
+    q.dateLabel = q.dateLabel ? q.dateLabel + ' / ' + r.label : r.label;
+    return true;
+  }
+
+  function resolveDate(s, now) {
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var monday = addDays(today, -((today.getDay() + 6) % 7));
+    var month1 = new Date(today.getFullYear(), today.getMonth(), 1);
+    var jan1 = new Date(today.getFullYear(), 0, 1);
+    var R = function (from, to, label) { return { from: from, to: to, label: label }; };
+    switch (s) {
+      case '今日': case 'きょう': case 'today': return R(today, addDays(today, 1), '今日');
+      case '昨日': case 'きのう': case 'yesterday': return R(addDays(today, -1), today, '昨日');
+      case '今週': case 'こんしゅう': case 'week': case 'thisweek': return R(monday, null, '今週');
+      case '先週': case 'せんしゅう': case 'lastweek': return R(addDays(monday, -7), monday, '先週');
+      case '今月': case 'こんげつ': case 'month': case 'thismonth': return R(month1, null, '今月');
+      case '先月': case 'せんげつ': case 'lastmonth': return R(addMonths(month1, -1), month1, '先月');
+      case '今年': case 'ことし': case 'year': case 'thisyear': return R(jan1, null, '今年');
+      case '去年': case '昨年': case 'きょねん': case 'さくねん': case 'lastyear': return R(new Date(jan1.getFullYear() - 1, 0, 1), jan1, '去年');
+    }
+    var m = /^(\d{1,3})(日|日間|d|days?|週|週間|w|weeks?|[かゖゕけ箇]月|か月間|m|months?|年|年間|y|years?)$/.exec(s);
+    if (m) {
+      var n = +m[1], u = m[2][0];
+      if (n <= 0) return null;
+      if (u === '日' || u === 'd') return R(addDays(now, -n), null, '直近' + n + '日');
+      if (u === '週' || u === 'w') return R(addDays(now, -7 * n), null, '直近' + n + '週間');
+      if (u === '年' || u === 'y') return R(addMonths(now, -12 * n), null, '直近' + n + '年');
+      return R(addMonths(now, -n), null, '直近' + n + 'か月');
+    }
+    var fiscal = function (y) { return y < 1900 || y > 2200 ? null : R(ymd(y, 4, 1), ymd(y + 1, 4, 1), y + '年度'); };
+    if ((m = /^(\d{4})年度$/.exec(s))) return fiscal(+m[1]);
+    if ((m = /^(令和|r|平成|h)(元|\d{1,2})年?(度)?$/.exec(s))) {
+      var en = m[2] === '元' ? 1 : +m[2], reiwa = m[1] === '令和' || m[1] === 'r';
+      if (en < 1 || (!reiwa && en > 31)) return null;
+      var ey = (reiwa ? 2018 : 1988) + en;
+      return m[3] ? fiscal(ey) : R(ymd(ey, 1, 1), ymd(ey + 1, 1, 1), ey + '年');
+    }
+    if ((m = /^(\d{4})年?$/.exec(s))) {
+      var y = +m[1];
+      return y < 1900 || y > 2200 ? null : R(ymd(y, 1, 1), ymd(y + 1, 1, 1), y + '年');
+    }
+    if ((m = /^(\d{4})(?:[-\/.年](\d{1,2})月?|(\d{2}))$/.exec(s))) {
+      var my = +m[1], mo = +(m[2] || m[3]);
+      return my < 1900 || my > 2200 || mo < 1 || mo > 12 ? null : R(ymd(my, mo, 1), ymd(my, mo + 1, 1), my + '年' + mo + '月');
+    }
+    if ((m = /^(\d{4})(?:[-\/.年](\d{1,2})[-\/.月](\d{1,2})日?|(\d{2})(\d{2}))$/.exec(s))) {
+      var dy = +m[1], dm = +(m[2] || m[4]), dd = +(m[3] || m[5]);
+      if (dy < 1900 || dy > 2200 || dm < 1 || dm > 12 || dd < 1 || dd > new Date(dy, dm, 0).getDate()) return null;
+      return R(ymd(dy, dm, dd), ymd(dy, dm, dd + 1), dy + '/' + dm + '/' + dd);
+    }
+    if ((m = /^(\d{1,2})月$/.exec(s))) {
+      var om = +m[1];
+      if (om < 1 || om > 12) return null;
+      var oy = om > today.getMonth() + 1 ? today.getFullYear() - 1 : today.getFullYear();
+      return R(ymd(oy, om, 1), ymd(oy, om + 1, 1), oy + '年' + om + '月');
+    }
+    return null;
   }
 
   // ------------------------------------------------------------------
@@ -163,16 +389,24 @@
     return (prev.charCodeAt(0) < 0x80) !== (cur.charCodeAt(0) < 0x80);
   }
 
-  FileIndex.prototype.score = function (i, key, terms, own, all, now) {
+  function firstMatch(key, alts) {
+    for (var j = 0; j < alts.length; j++) {
+      var pos = key.indexOf(alts[j]);
+      if (pos >= 0) return { term: alts[j], pos: pos };
+    }
+    return null;
+  }
+
+  FileIndex.prototype.score = function (i, key, alts, own, all, now, preferFolders) {
     var s = 0, matched = 0;
-    for (var t = 0; t < terms.length; t++) {
+    for (var t = 0; t < alts.length; t++) {
       if ((own & (1 << t)) === 0) { s += 1.5; continue; }
-      var term = terms[t];
-      var pos = key.indexOf(term);
+      var f = firstMatch(key, alts[t]);
+      if (!f) continue;
       s += 10;
-      matched += term.length;
-      if (pos === 0) s += 6;
-      else if (isBoundary(key, pos)) s += 3;
+      matched += f.term.length;
+      if (f.pos === 0) s += 6;
+      else if (isBoundary(key, f.pos)) s += 3;
     }
     if (own === all) s += 6;
     var baseLen = key.length;
@@ -181,7 +415,7 @@
       if (dot > 0) baseLen = dot;
     }
     if (baseLen > 0) s += 10 * Math.min(1, matched / baseLen);
-    if (this.isDir(i)) s += 3;
+    if (this.isDir(i)) s += preferFolders ? 18 : 3; // 保存先を選ぶときはフォルダを上に
     s -= this.depth[i] * 0.35;
     var mt = this.mtime[i];
     if (mt > 0) {
@@ -192,13 +426,36 @@
     return s;
   };
 
-  /** すべての語を「名前 or 親フォルダ名」に含み、少なくとも 1 語は自分の名前に含む項目を返す。 */
+  FileIndex.prototype.passFilters = function (i, key, q) {
+    var dir = this.isDir(i);
+    if (q.kind === KIND_FOLDERS && !dir) return false;
+    if (q.kind === KIND_FILES && dir) return false;
+    if (q.exts.length > 0) {
+      if (dir) return false;
+      var dot = key.lastIndexOf('.');
+      if (dot < 0) return false;
+      var ext = key.slice(dot + 1);
+      if (!q.exts.some(function (e) { return ext.indexOf(e) === 0; })) return false;
+    }
+    if (q.minTime > 0 || q.maxTime > 0) {
+      var mt = this.mtime[i];
+      if (!(mt > 0)) return false;
+      if (q.minTime > 0 && mt < q.minTime) return false;
+      if (q.maxTime > 0 && mt >= q.maxTime) return false;
+    }
+    return true;
+  };
+
+  /**
+   * すべての語を「名前 or 親フォルダ名」に含み、少なくとも 1 語は自分の名前に含む項目を返す。
+   * 語がなく絞り込み (.xlsx / @今週) だけなら、条件に合うものを新しい順に返す。
+   */
   FileIndex.prototype.search = function (q, scope, boost, limit, now) {
     var heap = new TopK(limit);
     var n = this.count;
-    var terms = q.terms.slice(0, 24);
-    var k = terms.length;
-    if (k === 0 || n === 0 || scope >= n) return heap.sorted();
+    var alts = q.alts.slice(0, 24);
+    var k = alts.length, filterOnly = k === 0, hasFilters = q.hasFilters();
+    if ((filterOnly && !hasFilters) || n === 0 || scope >= n) return heap.sorted();
     var excl = q.excludes;
     var all = (1 << k) - 1;
     var start = scope >= 0 ? scope : 0;
@@ -215,12 +472,21 @@
       if ((inherited & EXCL_BIT) !== 0) { anc[i] = inherited; continue; }
       var key = this.key[i];
       var own = 0;
-      for (var t = 0; t < k; t++) if (key.indexOf(terms[t]) >= 0) own |= 1 << t;
+      for (var t = 0; t < k; t++) {
+        var a = alts[t];
+        for (var j = 0; j < a.length; j++) if (key.indexOf(a[j]) >= 0) { own |= 1 << t; break; }
+      }
       var m = inherited | own;
       for (var e = 0; e < excl.length; e++) if (key.indexOf(excl[e]) >= 0) { m |= EXCL_BIT; break; }
       anc[i] = m;
-      if (own === 0 || (m & EXCL_BIT) !== 0 || (m & all) !== all) continue;
-      var sc = this.score(i, key, terms, own, all, now);
+      if ((m & EXCL_BIT) !== 0) continue;
+      if (!filterOnly && (own === 0 || (m & all) !== all)) continue;
+      if (hasFilters && !this.passFilters(i, key, q)) continue;
+      if (filterOnly) {
+        if (this.parent[i] >= 0) heap.offer(this.mtime[i], i); // 新しい順
+        continue;
+      }
+      var sc = this.score(i, key, alts, own, all, now, q.preferFolders);
       if (boost && boost.has(i)) sc += boost.get(i);
       heap.offer(sc, i);
     }
@@ -389,14 +655,14 @@
     return d.getFullYear() + '/' + mm + '/' + dd;
   }
 
-  function highlight(name, key, terms) {
-    if (!name || !key || name.length !== key.length || terms.length === 0) return null;
+  function highlight(name, key, alts) {
+    if (!name || !key || name.length !== key.length || alts.length === 0) return null;
     var marks = new Array(name.length);
     var any = false;
-    terms.forEach(function (term) {
-      var pos = key.indexOf(term);
-      if (pos < 0) return;
-      for (var i = pos; i < pos + term.length; i++) marks[i] = true;
+    alts.forEach(function (a) {
+      var f = firstMatch(key, a);
+      if (!f) return;
+      for (var i = f.pos; i < f.pos + f.term.length; i++) marks[i] = true;
       any = true;
     });
     if (!any) return null;
@@ -448,24 +714,45 @@
     return item;
   };
 
-  QueryEngine.prototype.compute = function (text, scope, index) {
+  QueryEngine.prototype.compute = function (text, scope, index, preferFolders) {
     var t = (text || '').trim();
     if (t[0] === '>' || t[0] === '＞') return this.commands(t.slice(1));
+    if (t === '?' || t === '？') return this.help();
     var asPath = tryParsePath(t);
     if (asPath) return this.pathItems(asPath, index);
-    var q = parseQuery(t);
-    if (q.terms.length === 0) return scope >= 0 ? this.childItems(index, scope) : this.home(index);
+    var q = parseQuery(t, this.host.synonyms ? this.host.synonyms() : null, new Date());
+    q.preferFolders = !!preferFolders;
+    if (q.isEmpty()) return scope >= 0 ? this.childItems(index, scope) : this.home(index, preferFolders);
     this.ensureBoost(index);
     var hits = index.search(q, scope, this._boost, MAX_RESULTS);
     var self = this;
     return hits.map(function (h) {
       var item = self.fromNode(index, h.node, true);
-      item.highlights = highlight(index.name[h.node], index.key[h.node], q.terms);
+      item.highlights = highlight(index.name[h.node], index.key[h.node], q.alts);
       return item;
     });
   };
 
-  QueryEngine.prototype.home = function (index) {
+  QueryEngine.prototype.help = function () {
+    var ex = function (example, description) {
+      return { kind: 'command', glyph: 'search', title: example, subtitle: description, action: 'query:' + example, keepOpen: true, badge: '例' };
+    };
+    return [
+      ex('見積 2024', 'スペースで区切ると、すべてを含むものに絞り込み (親フォルダの名前も対象)'),
+      ex('見積 .xlsx', '拡張子で絞り込み (.xls だけで .xlsx / .xlsm も)。.* はファイルだけ'),
+      ex('営業/', '末尾に / を付けるとフォルダだけ (/ だけなら、すべてのフォルダ)'),
+      ex('.pdf @今週', '更新日で絞り込み: @今日 @昨日 @今週 @先週 @今月 @先月 @今年 @去年'),
+      ex('@7日', '最近 N 日に更新したもの (@2週 @3か月 @1年 も)。新しい順に並びます'),
+      ex('議事録 @2024-05', '年・月・日で指定: @2024 @2024-05 @2024-05-12 @2024年度 @r6'),
+      ex('契約 @2024-04以降', '以降 / 以前 を付けると、その日より後 / 前'),
+      ex('議事録 -旧', '- を付けた言葉を含むものを除外'),
+      ex('R6 見積', '和暦と西暦は同じものとして探します (2024 = 令和6 = R6)'),
+      ex('見積もり', '表記ゆれ辞書: 見積 / 見積り / お見積 なども探します (> 設定ファイル で追加)'),
+      ex('>', 'コマンド (再スキャン・見た目の設定など)')
+    ];
+  };
+
+  QueryEngine.prototype.home = function (index, foldersOnly) {
     var items = [];
     var roots = this.host.roots();
     if (roots.length === 0) {
@@ -483,7 +770,7 @@
     var recent = [];
     var top = this.usage.topHistory(40);
     for (var i = 0; i < top.length && recent.length < 10; i++) {
-      if (this.usage.isPinned(top[i].path)) continue;
+      if (this.usage.isPinned(top[i].path) || (foldersOnly && !top[i].isDir)) continue;
       recent.push(this.fromUsage(top[i], map, false));
     }
     if (recent.length > 0) {
@@ -540,13 +827,17 @@
   };
 
   QueryEngine.prototype.commands = function (filter) {
-    var all = this.host.commands();
+    var main = this.host.commands();
     var q = parseQuery(filter);
-    if (q.terms.length === 0) return all;
-    return all.filter(function (item) {
+    if (q.terms.length === 0) return main;
+    var all = main.concat(this.host.appearanceCommands ? this.host.appearanceCommands() : []);
+    var matched = all.filter(function (item) {
       var key = normKey(item.title + ' ' + (item.subtitle || ''));
       return q.terms.every(function (term) { return key.indexOf(term) >= 0; });
     });
+    // 名前が入力した語で始まるコマンドを先に (「>設定」なら「設定ファイルを開く」が一番上)
+    var starts = function (item) { return normKey(item.title).indexOf(q.terms[0]) === 0; };
+    return matched.filter(starts).concat(matched.filter(function (x) { return !starts(x); }));
   };
 
   function cmd(glyph, title, subtitle, action, keepOpen) {
@@ -596,6 +887,8 @@
       return Math.min(t, now - 3600000);
     };
     var mm = function (m) { return ('0' + m).slice(-2); };
+    var curMonth = new Date(now).getMonth() + 1;
+    var future = function (y, m) { return y > thisYear || (y === thisYear && m > curMonth); };
 
     var companies = ['青葉商事', '北斗工業', 'みなと電機', 'さくら物流', 'あおい建設', 'ひかり製薬', 'つばさ食品', 'かえで不動産',
       'いずみ精機', 'ほのか印刷', 'はやぶさ運輸', 'こだま技研', 'しらかば産業', 'わかば医療', 'やまびこ通信', 'あさひ化成',
@@ -618,11 +911,15 @@
       var yd = dir(gijiroku, y + '年度', at(y, 4, 1));
       for (var m = 1; m <= 12; m++) {
         if (rnd() < 0.25) continue;
+        if (future(y, m)) continue;
         file(yd, '定例会議議事録_' + y + '-' + mm(m) + '-' + mm(5 + Math.floor(rnd() * 20)) + '.docx', at(y, m));
       }
     });
     var shanaiho = dir(soumu, '社内報');
-    years.forEach(function (y) { file(shanaiho, '社内報_' + y + '夏号.pdf', at(y, 7)); file(shanaiho, '社内報_' + y + '冬号.pdf', at(y, 12)); });
+    years.forEach(function (y) {
+      if (!future(y, 7)) file(shanaiho, '社内報_' + y + '夏号.pdf', at(y, 7));
+      if (!future(y, 12)) file(shanaiho, '社内報_' + y + '冬号.pdf', at(y, 12));
+    });
 
     // 02_営業部
     var eigyo = dir(root, '02_営業部');
@@ -640,17 +937,19 @@
           var kd = dir(yd, kind[0], at(y, 4, 2));
           var n = 2 + Math.floor(rnd() * 6);
           for (var i = 0; i < n; i++) {
-            var m = 1 + Math.floor(rnd() * 12);
+            var m = 1 + Math.floor(rnd() * (y === thisYear ? curMonth : 12));
             var suffix = rnd() < 0.15 ? '_修正版' : rnd() < 0.1 ? '_最終' : '';
-            file(kd, kind[1] + '_' + c + '_' + y + '-' + mm(m) + suffix + '.' + kind[2], at(y, m));
+            var label = kind[1];
+            if (kind[0] === '見積') label = pick(['見積書', '見積書', '御見積書', '見積り']); // 表記ゆれ
+            file(kd, label + '_' + c + '_' + y + '-' + mm(m) + suffix + '.' + kind[2], at(y, m));
           }
           if (kind[0] === '見積' && rnd() < 0.5) file(kd, '単価表_' + y + '.xlsx', at(y, 4));
         });
         if (rnd() < 0.6) {
           var md = dir(yd, '打合せメモ', at(y, 5));
           for (var i = 0; i < 2 + Math.floor(rnd() * 5); i++) {
-            var m = 1 + Math.floor(rnd() * 12);
-            file(md, '打合せ_' + c + '_' + y + mm(m) + mm(1 + Math.floor(rnd() * 27)) + '.docx', at(y, m));
+            var m = 1 + Math.floor(rnd() * (y === thisYear ? curMonth : 12));
+            file(md, pick(['打合せ', '打ち合わせ', '打合せメモ']) + '_' + c + '_' + y + mm(m) + mm(1 + Math.floor(rnd() * 27)) + '.docx', at(y, m));
           }
         }
       });
@@ -658,11 +957,11 @@
     var uriage = dir(eigyo, '売上報告');
     years.forEach(function (y) {
       var yd = dir(uriage, y + '年度', at(y, 4, 1));
-      for (var m = 1; m <= 12; m++) file(yd, '月次売上報告_' + y + '-' + mm(m) + '.xlsx', at(y, m, 28));
+      for (var m = 1; m <= 12; m++) if (!future(y, m)) file(yd, '月次売上報告_' + y + '-' + mm(m) + '.xlsx', at(y, m, 28));
     });
     var eikai = dir(eigyo, '営業会議');
     years.slice(-2).forEach(function (y) {
-      for (var m = 1; m <= 12; m++) if (rnd() < 0.6) file(eikai, '営業会議資料_' + y + '-' + mm(m) + '.pptx', at(y, m));
+      for (var m = 1; m <= 12; m++) if (rnd() < 0.6 && !future(y, m)) file(eikai, '営業会議資料_' + y + '-' + mm(m) + '.pptx', at(y, m));
     });
     file(eigyo, '顧客リスト_最新.xlsx', now - 2 * DAY);
     file(eigyo, '【至急】価格改定のお知らせ_ドラフト.docx', now - 5 * DAY);
@@ -678,9 +977,17 @@
     years.slice(-3).forEach(function (y) {
       var yd = dir(shiharai, String(y), at(y, 1, 1));
       for (var m = 1; m <= 12; m++) {
+        if (future(y, m)) continue;
         var md = dir(yd, mm(m) + '月', at(y, m, 1));
         for (var i = 0; i < 4; i++) file(md, '支払明細_' + pick(companies) + '_' + y + mm(m) + '.pdf', at(y, m));
       }
+    });
+    var yosan = dir(keiri, '予算');
+    years.slice(-4).forEach(function (y) {
+      var era = 'R' + (y - 2018);
+      var yd = dir(yosan, era + '年度', at(y - 1, 2, 1)); // 和暦のフォルダ名 (2024 でも見つかる)
+      file(yd, era + '年度予算_全社.xlsx', at(y - 1, 3));
+      file(yd, '令和' + (y - 2018) + '年度_部門別予算案.xlsx', at(y - 1, 2));
     });
     var keihi = dir(keiri, '経費精算');
     file(keihi, '経費精算書_テンプレート.xlsx'); file(keihi, '経費精算の手引き.pdf');
@@ -714,17 +1021,20 @@
       for (var i = 1; i <= 8; i++) file(mtg, '進捗定例_第' + i + '回.docx', at(y, 2 + i));
     });
     var ref = dir(kaihatsu, '技術資料');
-    ['ＡＷＳ構築メモ.docx', 'Ｇｉｔ運用ルール.pdf', 'ネットワーク構成図.pptx', 'サーバー一覧.xlsx'].forEach(function (f) { file(ref, f); });
+    ['ＡＷＳ構築メモ.docx', 'Ｇｉｔ運用ルール.pdf', 'ネットワーク構成図.pptx', 'サーバー一覧.xlsx', 'サーバ移行手順.docx'].forEach(function (f) { file(ref, f); });
 
     // 06_製造部
     var seizo = dir(root, '06_製造部');
     var hinshitsu = dir(seizo, '品質管理');
     years.slice(-3).forEach(function (y) {
       var yd = dir(hinshitsu, y + '年', at(y, 1));
-      for (var i = 0; i < 6; i++) file(yd, '不良報告書_' + y + mm(1 + Math.floor(rnd() * 12)) + '_' + ('00' + Math.floor(rnd() * 100)).slice(-3) + '.xlsx', at(y, 1 + Math.floor(rnd() * 12)));
+      for (var i = 0; i < 6; i++) {
+        var fm = 1 + Math.floor(rnd() * (y === thisYear ? curMonth : 12));
+        file(yd, '不良報告書_' + y + mm(fm) + '_' + ('00' + Math.floor(rnd() * 100)).slice(-3) + '.xlsx', at(y, fm));
+      }
     });
     var koutei = dir(seizo, '工程表');
-    years.slice(-2).forEach(function (y) { for (var m = 1; m <= 12; m++) file(koutei, '生産工程表_' + y + '-' + mm(m) + '.xlsx', at(y, m)); });
+    years.slice(-2).forEach(function (y) { for (var m = 1; m <= 12; m++) if (!future(y, m)) file(koutei, '生産工程表_' + y + '-' + mm(m) + '.xlsx', at(y, m)); });
     file(seizo, 'ミツモリ依頼_部材一覧.xlsx', now - 9 * DAY);
 
     // 99_共有
@@ -782,7 +1092,8 @@
   }
 
   root.FJ = {
-    normKey: normKey, parseQuery: parseQuery, trimPath: trimPath, lastSegment: lastSegment, parentPath: parentPath,
+    normKey: normKey, parseQuery: parseQuery, Synonyms: Synonyms, DEFAULT_SYNONYMS: DEFAULT_SYNONYMS, eraAlternatives: eraAlternatives,
+    KIND_FOLDERS: KIND_FOLDERS, KIND_FILES: KIND_FILES, trimPath: trimPath, lastSegment: lastSegment, parentPath: parentPath,
     isUnder: isUnder, prettyPath: prettyPath, tryParsePath: tryParsePath, highlight: highlight, formatDate: formatDate,
     FileIndex: FileIndex, UsageStore: UsageStore, QueryEngine: QueryEngine, frecency: frecency,
     buildSampleServer: buildSampleServer, buildFromFiles: buildFromFiles, MAX_RESULTS: MAX_RESULTS

@@ -19,58 +19,14 @@ namespace FolderJump
 {
     internal enum OpenMode { Open, Reveal, NewWindow }
 
-    /// <summary>配色 (ダークテーマ + シアン→バイオレットのアクセント)。</summary>
-    internal static class Palette
-    {
-        public static readonly Brush CardBg = Solid("#F2111318");
-        public static readonly Brush FooterBg = Solid("#0AFFFFFF");
-        public static readonly Brush Text1 = Solid("#F1F3F8");
-        public static readonly Brush Text2 = Solid("#B4BCCB");
-        public static readonly Brush Text3 = Solid("#7C8597");
-        public static readonly Brush Text4 = Solid("#4E5566");
-        public static readonly Brush Accent = Solid("#38BDF8");
-        public static readonly Brush Accent2 = Solid("#A78BFA");
-        public static readonly Brush Match = Solid("#67E8F9");
-        public static readonly Brush Green = Solid("#34D399");
-        public static readonly Brush Hover = Solid("#0FFFFFFF");
-        public static readonly Brush Divider = Solid("#1AFFFFFF");
-        public static readonly Brush ChipBg = Solid("#1F38BDF8");
-        public static readonly Brush ChipBorder = Solid("#5538BDF8");
-        public static readonly Brush KeyBorder = Solid("#33FFFFFF");
-        public static readonly Brush Selection = Solid("#5538BDF8");
-        public static readonly Brush CardBorder = Gradient("#7038BDF8", "#70A78BFA", 0);
-        public static readonly Brush Selected = Gradient("#3038BDF8", "#18A78BFA", 0);
-        public static readonly Brush AccentVertical = Gradient("#38BDF8", "#A78BFA", 90);
-        public static readonly Brush Line = Gradient("#5538BDF8", "#00A78BFA", 0);
-
-        static Brush Solid(string hex)
-        {
-            var b = new SolidColorBrush(C(hex));
-            b.Freeze();
-            return b;
-        }
-
-        static Brush Gradient(string a, string b, double angle)
-        {
-            var g = new LinearGradientBrush(C(a), C(b), angle);
-            g.Freeze();
-            return g;
-        }
-
-        public static Color C(string hex)
-        {
-            return (Color)ColorConverter.ConvertFromString(hex);
-        }
-    }
-
     /// <summary>
     /// ホットキーで呼び出すランチャー本体。
     /// 入力 → (バックグラウンドで) 検索 → 結果表示、を 1 キー入力ごとに行う。
     /// </summary>
     internal sealed class LauncherWindow : Window
     {
-        const double WindowWidth = 820;
-        const string DefaultPlaceholder = "フォルダ名・ファイル名で検索   (スペースで絞り込み / パスの貼り付けも OK)";
+        const string DefaultPlaceholder = "フォルダ名・ファイル名で検索   (スペースで絞り込み / ? で書き方の一覧)";
+        const string DialogPlaceholder = "移動先のフォルダを検索   (Enter でこの画面を移動 / Ctrl+Enter はエクスプローラー)";
 
         static readonly FontFamily UiFont = new FontFamily("Segoe UI Variable Text, Segoe UI, Yu Gothic UI, Meiryo UI");
         static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
@@ -98,9 +54,12 @@ namespace FolderJump
         }
 
         readonly App app;
+        Theme T;
         TextBox box;
         TextBlock placeholder;
         StackPanel scopeChips;
+        Border dialogBanner;
+        TextBlock dialogText;
         TextBlock countText;
         StackPanel list;
         ScrollViewer scroller;
@@ -112,6 +71,8 @@ namespace FolderJump
         Rectangle scanGlow;
         TranslateTransform glowShift, slide;
         bool glowOn;
+        string lastStatus = "";
+        bool lastScanning, lastReady;
 
         readonly List<Row> rows = new List<Row>();
         List<ResultItem> items = new List<ResultItem>();
@@ -122,6 +83,7 @@ namespace FolderJump
         string scopePath;
         FileIndex scopeIndex;
         int pendingSelectNode = -1;
+        int pendingSelectIndex = -1;
         OpenMode? pendingMode;
 
         readonly DispatcherTimer debounce;
@@ -132,11 +94,13 @@ namespace FolderJump
         bool allowClose;
 
         public IntPtr PreviousExplorer;
+        public IntPtr PreviousDialog;
         public bool SuppressAutoHide;
 
-        public LauncherWindow(App app)
+        public LauncherWindow(App app, Theme theme)
         {
             this.app = app;
+            T = theme;
             Title = "FolderJump";
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
@@ -144,13 +108,13 @@ namespace FolderJump
             ResizeMode = ResizeMode.NoResize;
             ShowInTaskbar = false;
             Topmost = true;
-            Width = WindowWidth;
             SizeToContent = SizeToContent.Height;
             WindowStartupLocation = WindowStartupLocation.Manual;
             FontFamily = UiFont;
             UseLayoutRounding = true;
             TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
 
+            Width = (T.CardWidth + 40) * T.Zoom;
             Content = BuildUi();
 
             debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(35) };
@@ -169,6 +133,33 @@ namespace FolderJump
 
         public IntPtr Handle { get { return new WindowInteropHelper(this).Handle; } }
 
+        /// <summary>見た目の設定が変わったら画面を作り直す (入力中の文字や階層はそのまま)。</summary>
+        public void ApplyTheme(Theme theme)
+        {
+            if (theme.Signature == T.Signature) return;
+            string text = box.Text;
+            T = theme;
+            rows.Clear();
+            items = new List<ResultItem>();
+            selected = -1;
+            glowOn = false;
+            Width = (T.CardWidth + 40) * T.Zoom;
+            Content = BuildUi();
+            box.Text = text;
+            box.CaretIndex = text.Length;
+            UpdateScopeChip();
+            UpdateDialogBanner();
+            SetStatus(lastStatus, lastScanning, lastReady);
+            if (IsVisible)
+            {
+                box.Focus();
+                Keyboard.Focus(box);
+                // 幅や大きさが変わったら中央に置き直す
+                Dispatcher.BeginInvoke(new Action(PlaceOnCursorMonitor), DispatcherPriority.Loaded);
+            }
+            RunQuery();
+        }
+
         // ------------------------------------------------------------------
         // 画面の組み立て
         // ------------------------------------------------------------------
@@ -179,15 +170,24 @@ namespace FolderJump
             var card = new Border
             {
                 CornerRadius = new CornerRadius(16),
-                Background = Palette.CardBg,
-                BorderBrush = Palette.CardBorder,
+                Background = T.CardBg,
+                BorderBrush = T.CardBorder,
                 BorderThickness = new Thickness(1),
                 Margin = new Thickness(20, 14, 20, 26),
                 RenderTransform = slide,
-                Effect = new DropShadowEffect { BlurRadius = 32, ShadowDepth = 8, Direction = 270, Opacity = 0.55, Color = Colors.Black }
+                Effect = new DropShadowEffect { BlurRadius = 32, ShadowDepth = 8, Direction = 270, Opacity = T.ShadowOpacity, Color = Colors.Black }
             };
 
             var dock = new DockPanel { LastChildFill = true };
+
+            // --- 保存ダイアログから呼ばれたときの案内 ---
+            dialogText = new TextBlock { FontSize = 11.5, Foreground = T.Accent, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+            var dialogRow = new StackPanel { Orientation = Orientation.Horizontal };
+            dialogRow.Children.Add(new TextBlock { FontFamily = IconFont, Text = "", FontSize = 12, Foreground = T.Accent, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 1, 8, 0) });
+            dialogRow.Children.Add(dialogText);
+            dialogBanner = new Border { Margin = new Thickness(21, 11, 18, 0), Child = dialogRow, Visibility = Visibility.Collapsed };
+            DockPanel.SetDock(dialogBanner, Dock.Top);
+            dock.Children.Add(dialogBanner);
 
             // --- 検索バー ---
             var header = new Grid { Margin = new Thickness(20, 14, 18, 12) };
@@ -198,7 +198,7 @@ namespace FolderJump
 
             var searchGlyph = new TextBlock
             {
-                FontFamily = IconFont, Text = "", FontSize = 19, Foreground = Palette.Accent,
+                FontFamily = IconFont, Text = "", FontSize = 19, Foreground = T.Accent,
                 VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 1, 14, 0)
             };
             Grid.SetColumn(searchGlyph, 0);
@@ -211,13 +211,13 @@ namespace FolderJump
             var boxHost = new Grid();
             placeholder = new TextBlock
             {
-                Text = DefaultPlaceholder, FontSize = 15, Foreground = Palette.Text4, IsHitTestVisible = false,
+                Text = DefaultPlaceholder, FontSize = 15, Foreground = T.Text4, IsHitTestVisible = false,
                 VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(3, 0, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis
             };
             box = new TextBox
             {
-                FontSize = 21, Background = Brushes.Transparent, BorderThickness = new Thickness(0), Foreground = Palette.Text1,
-                CaretBrush = Palette.Accent, SelectionBrush = Palette.Selection, VerticalContentAlignment = VerticalAlignment.Center,
+                FontSize = 21, Background = Brushes.Transparent, BorderThickness = new Thickness(0), Foreground = T.Text1,
+                CaretBrush = T.Accent, SelectionBrush = T.Selection, VerticalContentAlignment = VerticalAlignment.Center,
                 Padding = new Thickness(0), Margin = new Thickness(0), MinHeight = 34, AcceptsTab = false
             };
             TextOptions.SetTextFormattingMode(box, TextFormattingMode.Ideal);
@@ -232,7 +232,7 @@ namespace FolderJump
             Grid.SetColumn(boxHost, 2);
             header.Children.Add(boxHost);
 
-            countText = new TextBlock { FontSize = 12, Foreground = Palette.Text3, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 2, 0, 0) };
+            countText = new TextBlock { FontSize = 12, Foreground = T.Text3, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 2, 0, 0) };
             Grid.SetColumn(countText, 3);
             header.Children.Add(countText);
 
@@ -241,14 +241,15 @@ namespace FolderJump
 
             // --- 区切り線 (スキャン中は光が流れる) ---
             var lineHost = new Grid { Height = 1.5, ClipToBounds = true, Margin = new Thickness(14, 0, 14, 0) };
-            lineHost.Children.Add(new Rectangle { Fill = Palette.Line });
+            lineHost.Children.Add(new Rectangle { Fill = T.Line });
             glowShift = new TranslateTransform(-260, 0);
+            Color a = T.AccentColor, b = T.Accent2Color;
             var glowStops = new GradientStopCollection
             {
-                new GradientStop(Palette.C("#0038BDF8"), 0),
-                new GradientStop(Palette.C("#FF38BDF8"), 0.55),
-                new GradientStop(Palette.C("#FFA78BFA"), 0.8),
-                new GradientStop(Palette.C("#00A78BFA"), 1)
+                new GradientStop(Color.FromArgb(0, a.R, a.G, a.B), 0),
+                new GradientStop(a, 0.55),
+                new GradientStop(b, 0.8),
+                new GradientStop(Color.FromArgb(0, b.R, b.G, b.B), 1)
             };
             scanGlow = new Rectangle
             {
@@ -262,18 +263,18 @@ namespace FolderJump
             // --- フッター ---
             var footer = new Border
             {
-                Background = Palette.FooterBg, CornerRadius = new CornerRadius(0, 0, 16, 16),
-                BorderBrush = Palette.Divider, BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(18, 9, 16, 10)
+                Background = T.FooterBg, CornerRadius = new CornerRadius(0, 0, 16, 16),
+                BorderBrush = T.Divider, BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(18, 9, 16, 10)
             };
             var fgrid = new Grid();
             fgrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             fgrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             statusPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            statusDot = new Ellipse { Width = 7, Height = 7, Fill = Palette.Text4, Margin = new Thickness(0, 1, 8, 0), VerticalAlignment = VerticalAlignment.Center };
-            statusText = new TextBlock { FontSize = 11.5, Foreground = Palette.Text3, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+            statusDot = new Ellipse { Width = 7, Height = 7, Fill = T.Text4, Margin = new Thickness(0, 1, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+            statusText = new TextBlock { FontSize = 11.5, Foreground = T.Text3, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
             statusPanel.Children.Add(statusDot);
             statusPanel.Children.Add(statusText);
-            toastText = new TextBlock { FontSize = 11.5, Foreground = Palette.Match, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed, TextTrimming = TextTrimming.CharacterEllipsis };
+            toastText = new TextBlock { FontSize = 11.5, Foreground = T.Match, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed, TextTrimming = TextTrimming.CharacterEllipsis };
             fgrid.Children.Add(statusPanel);
             fgrid.Children.Add(toastText);
             var hints = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -282,6 +283,7 @@ namespace FolderJump
             AddHint(hints, "Tab", "中へ");
             AddHint(hints, "Ctrl+D", "ピン");
             AddHint(hints, "Ctrl+C", "コピー");
+            AddHint(hints, "?", "書き方");
             AddHint(hints, ">", "コマンド");
             Grid.SetColumn(hints, 1);
             fgrid.Children.Add(hints);
@@ -294,14 +296,14 @@ namespace FolderJump
             list = new StackPanel { Margin = new Thickness(8, 6, 8, 6) };
             scroller = new ScrollViewer
             {
-                Content = list, MaxHeight = 470, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                Content = list, MaxHeight = T.Compact ? 520 : 470, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = false, CanContentScroll = false
             };
             body.Children.Add(scroller);
 
             emptyPanel = new StackPanel { Margin = new Thickness(28, 10, 28, 18), Visibility = Visibility.Collapsed };
-            emptyTitle = new TextBlock { FontSize = 15, Foreground = Palette.Text1, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
-            emptyBody = new TextBlock { FontSize = 12.5, Foreground = Palette.Text3, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap, LineHeight = 20 };
+            emptyTitle = new TextBlock { FontSize = 15, Foreground = T.Text1, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+            emptyBody = new TextBlock { FontSize = 12.5, Foreground = T.Text3, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap, LineHeight = 20 };
             emptyPanel.Children.Add(emptyTitle);
             emptyPanel.Children.Add(emptyBody);
             var bodyStack = new StackPanel();
@@ -310,22 +312,24 @@ namespace FolderJump
             dock.Children.Add(bodyStack);
 
             card.Child = dock;
-            return card;
+            var root = new Grid { LayoutTransform = new ScaleTransform(T.Zoom, T.Zoom) };
+            root.Children.Add(card);
+            return root;
         }
 
-        static void AddHint(Panel host, string key, string label)
+        void AddHint(Panel host, string key, string label)
         {
             var cap = new Border
             {
-                CornerRadius = new CornerRadius(4), BorderBrush = Palette.KeyBorder, BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(4), BorderBrush = T.KeyBorder, BorderThickness = new Thickness(1),
                 Padding = new Thickness(5, 0, 5, 1), VerticalAlignment = VerticalAlignment.Center,
-                Child = new TextBlock { Text = key, FontSize = 10.5, Foreground = Palette.Text2 }
+                Child = new TextBlock { Text = key, FontSize = 10.5, Foreground = T.Text2 }
             };
             host.Children.Add(cap);
             host.Children.Add(new TextBlock
             {
-                Text = label, FontSize = 11, Foreground = Palette.Text3, VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(5, 0, 12, 0)
+                Text = label, FontSize = 11, Foreground = T.Text3, VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(5, 0, 11, 0)
             });
         }
 
@@ -336,33 +340,35 @@ namespace FolderJump
             var layers = new Grid();
             r.Bar = new Border
             {
-                Width = 3, CornerRadius = new CornerRadius(2), Background = Palette.AccentVertical,
-                HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 9, 0, 9), Visibility = Visibility.Hidden
+                Width = 3, CornerRadius = new CornerRadius(2), Background = T.AccentVertical,
+                HorizontalAlignment = HorizontalAlignment.Left, Margin = T.Compact ? new Thickness(0, 6, 0, 6) : new Thickness(0, 9, 0, 9),
+                Visibility = Visibility.Hidden
             };
             layers.Children.Add(r.Bar);
 
-            r.Content = new Grid { Margin = new Thickness(12, 7, 12, 7) };
-            r.Content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
+            r.Content = new Grid { Margin = T.Compact ? new Thickness(12, 4, 12, 4) : new Thickness(12, 7, 12, 7) };
+            r.Content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(T.Compact ? 30 : 36) });
             r.Content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             r.Content.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            r.Icon = new Image { Width = 22, Height = 22, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+            double iconSize = T.Compact ? 18 : 22;
+            r.Icon = new Image { Width = iconSize, Height = iconSize, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
             RenderOptions.SetBitmapScalingMode(r.Icon, BitmapScalingMode.HighQuality);
-            r.Glyph = new TextBlock { FontFamily = IconFont, FontSize = 17, Foreground = Palette.Accent, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 0, 0) };
+            r.Glyph = new TextBlock { FontFamily = IconFont, FontSize = T.Compact ? 15 : 17, Foreground = T.Accent, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 0, 0) };
             r.Content.Children.Add(r.Icon);
             r.Content.Children.Add(r.Glyph);
 
             var texts = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            r.Title = new TextBlock { FontSize = 14.5, Foreground = Palette.Text1, TextTrimming = TextTrimming.CharacterEllipsis };
-            r.Sub = new TextBlock { FontSize = 11.5, Foreground = Palette.Text3, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 2, 0, 0) };
+            r.Title = new TextBlock { FontSize = T.Compact ? 14 : 14.5, Foreground = T.Text1, TextTrimming = TextTrimming.CharacterEllipsis };
+            r.Sub = new TextBlock { FontSize = 11.5, Foreground = T.Text3, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 2, 0, 0) };
             texts.Children.Add(r.Title);
             texts.Children.Add(r.Sub);
             Grid.SetColumn(texts, 1);
             r.Content.Children.Add(texts);
 
             var right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(14, 0, 0, 0) };
-            r.Pin = new TextBlock { FontFamily = IconFont, FontSize = 12, Text = "", Foreground = Palette.Accent2, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
-            r.Badge = new TextBlock { FontSize = 11.5, Foreground = Palette.Text3, VerticalAlignment = VerticalAlignment.Center };
+            r.Pin = new TextBlock { FontFamily = IconFont, FontSize = 12, Text = "", Foreground = T.Accent2, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+            r.Badge = new TextBlock { FontSize = 11.5, Foreground = T.Text3, VerticalAlignment = VerticalAlignment.Center };
             right.Children.Add(r.Pin);
             right.Children.Add(r.Badge);
             Grid.SetColumn(right, 2);
@@ -371,7 +377,7 @@ namespace FolderJump
 
             r.Header = new TextBlock
             {
-                FontSize = 11, FontWeight = FontWeights.SemiBold, Foreground = Palette.Text3,
+                FontSize = 11, FontWeight = FontWeights.SemiBold, Foreground = T.Text3,
                 Margin = new Thickness(12, 10, 0, 3), Visibility = Visibility.Collapsed
             };
             layers.Children.Add(r.Header);
@@ -379,7 +385,7 @@ namespace FolderJump
 
             r.Root.MouseEnter += delegate
             {
-                if (r.Item != null && r.Item.Selectable && r.Index != selected) r.Root.Background = Palette.Hover;
+                if (r.Item != null && r.Item.Selectable && r.Index != selected) r.Root.Background = T.Hover;
             };
             r.Root.MouseLeave += delegate
             {
@@ -429,15 +435,17 @@ namespace FolderJump
             }
 
             SetTitle(r.Title, item);
+            // コンパクト表示ではパスを出さない (コマンドの説明は出す)
+            bool showSub = !string.IsNullOrEmpty(item.Subtitle) && (!T.Compact || item.Kind == ItemKind.Command);
             r.Sub.Text = item.Subtitle ?? "";
-            r.Sub.Visibility = string.IsNullOrEmpty(item.Subtitle) ? Visibility.Collapsed : Visibility.Visible;
+            r.Sub.Visibility = showSub ? Visibility.Visible : Visibility.Collapsed;
             r.Badge.Text = item.Badge ?? "";
             r.Pin.Visibility = item.Pinned ? Visibility.Visible : Visibility.Collapsed;
             r.Root.ToolTip = item.Path;
             ApplySelection(r, index == selected);
         }
 
-        static void SetTitle(TextBlock tb, ResultItem item)
+        void SetTitle(TextBlock tb, ResultItem item)
         {
             tb.Inlines.Clear();
             string t = item.Title ?? "";
@@ -453,15 +461,15 @@ namespace FolderJump
                 int s = h[i], len = h[i + 1];
                 if (s < pos || len <= 0 || s + len > t.Length) continue;
                 if (s > pos) tb.Inlines.Add(new Run(t.Substring(pos, s - pos)));
-                tb.Inlines.Add(new Run(t.Substring(s, len)) { Foreground = Palette.Match, FontWeight = FontWeights.SemiBold });
+                tb.Inlines.Add(new Run(t.Substring(s, len)) { Foreground = T.Match, FontWeight = FontWeights.SemiBold });
                 pos = s + len;
             }
             if (pos < t.Length) tb.Inlines.Add(new Run(t.Substring(pos)));
         }
 
-        static void ApplySelection(Row r, bool on)
+        void ApplySelection(Row r, bool on)
         {
-            r.Root.Background = on ? Palette.Selected : Brushes.Transparent;
+            r.Root.Background = on ? T.Selected : Brushes.Transparent;
             r.Bar.Visibility = on ? Visibility.Visible : Visibility.Hidden;
         }
 
@@ -469,24 +477,34 @@ namespace FolderJump
         // 表示 / 非表示
         // ------------------------------------------------------------------
 
-        public void ShowLauncher(IntPtr previousExplorer)
+        public void ShowLauncher(IntPtr previousExplorer, IntPtr previousDialog)
         {
             PreviousExplorer = previousExplorer;
+            PreviousDialog = previousDialog;
+            UpdateDialogBanner();
             if (scope >= 0) ClearScope();
             if (!IsVisible)
             {
                 PlaceOnCursorMonitor();
-                Opacity = 0;
-                Show();
-                var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(130)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } };
-                fade.Completed += delegate
+                if (T.Animations)
+                {
+                    Opacity = 0;
+                    Show();
+                    var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(130)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } };
+                    fade.Completed += delegate
+                    {
+                        Opacity = 1;
+                        BeginAnimation(OpacityProperty, null);
+                    };
+                    BeginAnimation(OpacityProperty, fade);
+                    slide.BeginAnimation(TranslateTransform.YProperty,
+                        new DoubleAnimation(-10, 0, TimeSpan.FromMilliseconds(190)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+                }
+                else
                 {
                     Opacity = 1;
-                    BeginAnimation(OpacityProperty, null);
-                };
-                BeginAnimation(OpacityProperty, fade);
-                slide.BeginAnimation(TranslateTransform.YProperty,
-                    new DoubleAnimation(-10, 0, TimeSpan.FromMilliseconds(190)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+                    Show();
+                }
             }
             Activate();
             Native.SetForegroundWindow(Handle);
@@ -518,6 +536,21 @@ namespace FolderJump
                 HideLauncher();
             }
             base.OnClosing(e);
+        }
+
+        void UpdateDialogBanner()
+        {
+            if (PreviousDialog != IntPtr.Zero)
+            {
+                dialogText.Text = "「" + FileDialogBridge.TitleOf(PreviousDialog) + "」の移動先を選んでいます。Enter でこの画面がフォルダへ移動します";
+                dialogBanner.Visibility = Visibility.Visible;
+                if (scope < 0) placeholder.Text = DialogPlaceholder;
+            }
+            else
+            {
+                dialogBanner.Visibility = Visibility.Collapsed;
+                if (scope < 0) placeholder.Text = DefaultPlaceholder;
+            }
         }
 
         /// <summary>マウスカーソルがあるモニターの上寄り中央に出す (モニターごとの DPI に対応)。</summary>
@@ -670,6 +703,7 @@ namespace FolderJump
             if (item == null) return;
             if (item.Kind == ItemKind.Command)
             {
+                int keep = selected;
                 if (!item.KeepOpen) HideLauncher();
                 try { item.Command(); }
                 catch (Exception ex)
@@ -677,10 +711,24 @@ namespace FolderJump
                     Log.Error("command", ex);
                     Toast("失敗しました: " + ex.Message);
                 }
-                if (item.KeepOpen && IsVisible) RunQuery();
+                if (item.KeepOpen && IsVisible)
+                {
+                    pendingSelectIndex = keep; // 「大きくする」を続けて押せるように同じ行を選んだままにする
+                    RunQuery();
+                }
                 return;
             }
-            app.OpenItem(item, mode, PreviousExplorer);
+            app.OpenItem(item, mode, PreviousExplorer, PreviousDialog);
+        }
+
+        /// <summary>入力欄の文字を置き換えて検索し直す (「?」の例を選んだとき等)。</summary>
+        public void SetQuery(string text)
+        {
+            box.Text = text;
+            box.CaretIndex = text.Length;
+            box.Focus();
+            pendingSelectIndex = -1;
+            RunQuery();
         }
 
         // ------------------------------------------------------------------
@@ -750,15 +798,15 @@ namespace FolderJump
             if (scope < 0)
             {
                 scopeChips.Visibility = Visibility.Collapsed;
-                placeholder.Text = DefaultPlaceholder;
+                placeholder.Text = PreviousDialog != IntPtr.Zero ? DialogPlaceholder : DefaultPlaceholder;
                 return;
             }
             var sp = new StackPanel { Orientation = Orientation.Horizontal };
-            sp.Children.Add(new TextBlock { FontFamily = IconFont, Text = "", FontSize = 12, Foreground = Palette.Accent, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
-            sp.Children.Add(new TextBlock { Text = PathUtil.Pretty(scopePath, 34), FontSize = 13, Foreground = Palette.Text1, VerticalAlignment = VerticalAlignment.Center });
+            sp.Children.Add(new TextBlock { FontFamily = IconFont, Text = "", FontSize = 12, Foreground = T.Accent, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+            sp.Children.Add(new TextBlock { Text = PathUtil.Pretty(scopePath, 34), FontSize = 13, Foreground = T.Text1, VerticalAlignment = VerticalAlignment.Center });
             scopeChips.Children.Add(new Border
             {
-                CornerRadius = new CornerRadius(8), Background = Palette.ChipBg, BorderBrush = Palette.ChipBorder, BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8), Background = T.ChipBg, BorderBrush = T.ChipBorder, BorderThickness = new Thickness(1),
                 Padding = new Thickness(9, 3, 10, 4), Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center,
                 ToolTip = scopePath, Child = sp
             });
@@ -811,15 +859,21 @@ namespace FolderJump
 
         public void SetStatus(string text, bool scanning, bool ready)
         {
+            lastStatus = text;
+            lastScanning = scanning;
+            lastReady = ready;
             statusText.Text = text;
-            statusDot.Fill = scanning ? Palette.Accent : ready ? Palette.Green : Palette.Text4;
+            statusDot.Fill = scanning ? T.Accent : ready ? T.Green : T.Text4;
             if (scanning == glowOn) return;
             glowOn = scanning;
             if (scanning)
             {
                 scanGlow.Visibility = Visibility.Visible;
-                glowShift.BeginAnimation(TranslateTransform.XProperty,
-                    new DoubleAnimation(-260, WindowWidth, TimeSpan.FromMilliseconds(1700)) { RepeatBehavior = RepeatBehavior.Forever });
+                if (T.Animations)
+                    glowShift.BeginAnimation(TranslateTransform.XProperty,
+                        new DoubleAnimation(-260, T.CardWidth, TimeSpan.FromMilliseconds(1700)) { RepeatBehavior = RepeatBehavior.Forever });
+                else
+                    glowShift.X = T.CardWidth * 0.35;
             }
             else
             {
@@ -869,6 +923,7 @@ namespace FolderJump
             debounce.Stop();
             string text = box.Text;
             int sc = scope;
+            bool dialogMode = PreviousDialog != IntPtr.Zero;
             FileIndex idx = sc >= 0 && scopeIndex != null ? scopeIndex : app.Index;
             int ver = ++queryVersion;
             if (cts != null) cts.Cancel();
@@ -879,7 +934,7 @@ namespace FolderJump
             List<ResultItem> res;
             try
             {
-                res = await Task.Run(() => app.Engine.Compute(text, sc, idx, token), token);
+                res = await Task.Run(() => app.Engine.Compute(text, sc, idx, token, dialogMode), token);
             }
             catch (OperationCanceledException)
             {
@@ -922,12 +977,19 @@ namespace FolderJump
                     if (items[i].Node == pendingSelectNode && items[i].Selectable) { target = i; break; }
                 pendingSelectNode = -1;
             }
+            if (pendingSelectIndex >= 0)
+            {
+                if (pendingSelectIndex < items.Count && items[pendingSelectIndex].Selectable) target = pendingSelectIndex;
+                pendingSelectIndex = -1;
+            }
             scroller.ScrollToTop();
             if (target >= 0) Select(target);
 
             int n = 0;
             foreach (ResultItem it in items) if (it.Kind == ItemKind.Entry) n++;
-            countText.Text = n == 0 ? "" : n >= QueryEngine.MaxResults ? n + "+ 件" : n + " 件";
+            string count = n == 0 ? "" : n >= QueryEngine.MaxResults ? n + "+ 件" : n + " 件";
+            string filter = DescribeFilters(text);
+            countText.Text = filter.Length == 0 ? count : (count.Length == 0 ? filter : count + "  ·  " + filter);
             UpdateEmpty(text);
 
             if (pendingMode.HasValue)
@@ -936,6 +998,13 @@ namespace FolderJump
                 pendingMode = null;
                 Execute(m);
             }
+        }
+
+        static string DescribeFilters(string text)
+        {
+            string t = text.Trim();
+            if (t.Length == 0 || t[0] == '>' || t[0] == '＞' || t[0] == '?' || t[0] == '？' || PathInput.TryParse(t) != null) return "";
+            return Query.Parse(t).Describe();
         }
 
         void UpdateEmpty(string text)
@@ -965,7 +1034,7 @@ namespace FolderJump
                 {
                     title = "見つかりませんでした";
                     body = "言葉の一部だけ (例: 「見積 2024」) や、親フォルダの名前を足してみてください。\n"
-                         + "「-旧」のように - を付けるとその言葉を含むものを除外できます。";
+                         + "「-旧」で除外、「.xlsx」で拡張子、「@今週」で更新日の絞り込みができます。? で書き方の一覧を表示します。";
                 }
             }
             if (title == null)

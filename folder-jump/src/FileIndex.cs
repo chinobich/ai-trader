@@ -94,16 +94,18 @@ namespace FolderJump
 
         /// <summary>
         /// すべてのキーワードを「名前 or 親フォルダ名」に含み、かつ少なくとも1つは自分の名前に含む項目を返す。
+        /// キーワードがなく絞り込み条件 (.xlsx や @今週) だけのときは、条件に合うものを新しい順に返す。
         /// scope を指定するとそのフォルダの中だけを探す。
         /// </summary>
         public List<SearchHit> Search(Query q, int scope, IDictionary<int, double> boost, int limit, CancellationToken ct)
         {
             var heap = new TopK(limit);
             int n = Count;
-            int k = Math.Min(q.Terms.Length, 24);
-            if (k == 0 || n == 0 || (scope >= n)) return heap.ToSortedList();
+            int k = Math.Min(q.Alts.Length, 24);
+            bool filterOnly = k == 0;
+            if ((filterOnly && !q.HasFilters) || n == 0 || (scope >= n)) return heap.ToSortedList();
 
-            string[] terms = q.Terms;
+            string[][] alts = q.Alts;
             string[] excl = q.Excludes;
             int all = (1 << k) - 1;
             int start = scope >= 0 ? scope : 0;
@@ -128,15 +130,27 @@ namespace FolderJump
                     string key = Key[i];
                     int own = 0;
                     for (int t = 0; t < k; t++)
-                        if (key.IndexOf(terms[t], StringComparison.Ordinal) >= 0) own |= 1 << t;
+                    {
+                        string[] a = alts[t];
+                        for (int j = 0; j < a.Length; j++)
+                            if (key.IndexOf(a[j], StringComparison.Ordinal) >= 0) { own |= 1 << t; break; }
+                    }
                     int m = inherited | own;
                     for (int e = 0; e < excl.Length; e++)
                         if (key.IndexOf(excl[e], StringComparison.Ordinal) >= 0) { m |= ExclBit; break; }
                     anc[i] = m;
 
-                    if (own == 0 || (m & ExclBit) != 0 || (m & all) != all) continue;
+                    if ((m & ExclBit) != 0) continue;
+                    if (!filterOnly && (own == 0 || (m & all) != all)) continue;
+                    if (q.HasFilters && !PassFilters(i, key, q)) continue;
 
-                    double score = Score(i, key, terms, k, own, all, now);
+                    if (filterOnly)
+                    {
+                        if (Parent[i] < 0) continue;
+                        heap.Offer(Mtime[i], i); // 新しい順
+                        continue;
+                    }
+                    double score = Score(i, key, alts, k, own, all, now, q.PreferFolders);
                     double b;
                     if (boost != null && boost.TryGetValue(i, out b)) score += b;
                     heap.Offer(score, i);
@@ -149,15 +163,55 @@ namespace FolderJump
             return heap.ToSortedList();
         }
 
-        double Score(int i, string key, string[] terms, int k, int own, int all, long now)
+        bool PassFilters(int i, string key, Query q)
+        {
+            bool dir = (Flags[i] & FlagDir) != 0;
+            if (q.Kind == Query.KindFolders && !dir) return false;
+            if (q.Kind == Query.KindFiles && dir) return false;
+            if (q.Exts.Length > 0)
+            {
+                if (dir) return false;
+                int dot = key.LastIndexOf('.');
+                if (dot < 0) return false;
+                bool ok = false;
+                foreach (string ext in q.Exts)
+                {
+                    if (key.Length - dot - 1 >= ext.Length && string.CompareOrdinal(key, dot + 1, ext, 0, ext.Length) == 0) { ok = true; break; }
+                }
+                if (!ok) return false;
+            }
+            if (q.MinTime > 0 || q.MaxTime > 0)
+            {
+                long mt = Mtime[i];
+                if (mt <= 0) return false;
+                if (q.MinTime > 0 && mt < q.MinTime) return false;
+                if (q.MaxTime > 0 && mt >= q.MaxTime) return false;
+            }
+            return true;
+        }
+
+        /// <summary>言い換えのうち、名前に最初に見つかったもの。</summary>
+        public static string FirstMatch(string key, string[] alts, out int pos)
+        {
+            for (int j = 0; j < alts.Length; j++)
+            {
+                pos = key.IndexOf(alts[j], StringComparison.Ordinal);
+                if (pos >= 0) return alts[j];
+            }
+            pos = -1;
+            return null;
+        }
+
+        double Score(int i, string key, string[][] alts, int k, int own, int all, long now, bool preferFolders)
         {
             double s = 0;
             int matched = 0;
             for (int t = 0; t < k; t++)
             {
                 if ((own & (1 << t)) == 0) { s += 1.5; continue; } // 親フォルダ側で一致
-                string term = terms[t];
-                int pos = key.IndexOf(term, StringComparison.Ordinal);
+                int pos;
+                string term = FirstMatch(key, alts[t], out pos);
+                if (term == null) continue;
                 s += 10;
                 matched += term.Length;
                 if (pos == 0) s += 6;
@@ -173,7 +227,7 @@ namespace FolderJump
             }
             if (baseLen > 0) s += 10.0 * Math.Min(1.0, (double)matched / baseLen);
 
-            if ((Flags[i] & FlagDir) != 0) s += 3;
+            if ((Flags[i] & FlagDir) != 0) s += preferFolders ? 18 : 3; // 保存先を選ぶときはフォルダを上に
             s -= Depth[i] * 0.35;
 
             long mt = Mtime[i];

@@ -40,6 +40,8 @@ namespace FolderJump
         void ToggleStartup();
         void ClearHistory();
         void Quit();
+        void SetQueryText(string text);
+        void ChangeSetting(string key, string value);
     }
 
     /// <summary>入力文字列から結果リストを組み立てる (バックグラウンドスレッドで実行)。</summary>
@@ -62,16 +64,19 @@ namespace FolderJump
             this.usage = usage;
         }
 
-        public List<ResultItem> Compute(string text, int scope, FileIndex index, CancellationToken ct)
+        /// <param name="preferFolders">保存ダイアログから呼ばれたとき true (フォルダを優先)</param>
+        public List<ResultItem> Compute(string text, int scope, FileIndex index, CancellationToken ct, bool preferFolders = false)
         {
             string t = (text ?? "").Trim();
             if (t.StartsWith(">") || t.StartsWith("＞")) return Commands(t.Substring(1));
+            if (t == "?" || t == "？") return Help();
 
             string asPath = PathInput.TryParse(t);
             if (asPath != null) return PathItems(asPath, index, ct);
 
-            Query q = Query.Parse(t);
-            if (q.IsEmpty) return scope >= 0 ? Children(index, scope) : Home(index, ct);
+            Query q = Query.Parse(t, host.CurrentSettings.Synonyms, DateTime.Now);
+            q.PreferFolders = preferFolders;
+            if (q.IsEmpty) return scope >= 0 ? Children(index, scope) : Home(index, ct, preferFolders);
 
             EnsureBoost(index, ct);
             Dictionary<int, double> b;
@@ -81,7 +86,7 @@ namespace FolderJump
             foreach (SearchHit h in hits)
             {
                 ResultItem item = FromNode(index, h.Node, true);
-                item.Highlights = Highlight(index.Name[h.Node], index.Key[h.Node], q.Terms);
+                item.Highlights = Highlight(index.Name[h.Node], index.Key[h.Node], q.Alts);
                 items.Add(item);
             }
             return items;
@@ -139,7 +144,7 @@ namespace FolderJump
             return item;
         }
 
-        List<ResultItem> Home(FileIndex index, CancellationToken ct)
+        List<ResultItem> Home(FileIndex index, CancellationToken ct, bool foldersOnly)
         {
             var items = new List<ResultItem>();
             Settings s = host.CurrentSettings;
@@ -161,7 +166,7 @@ namespace FolderJump
             var recent = new List<ResultItem>();
             foreach (UsageEntry h in usage.TopHistory(40))
             {
-                if (usage.IsPinned(h.Path)) continue;
+                if (usage.IsPinned(h.Path) || (foldersOnly && !h.IsDir)) continue;
                 recent.Add(FromUsage(h, map, false));
                 if (recent.Count >= 10) break;
             }
@@ -248,35 +253,104 @@ namespace FolderJump
 
         List<ResultItem> Commands(string filter)
         {
-            var all = new List<ResultItem>();
-            all.Add(Cmd("", "今すぐ再スキャン", "インデックスを最新の状態に作り直します", host.Rescan, true));
-            all.Add(Cmd("", "フォルダを選んで検索対象に追加…", null, host.PickRootFolder, true));
+            var main = new List<ResultItem>();
+            main.Add(Cmd("\uE72C", "今すぐ再スキャン", "インデックスを最新の状態に作り直します", host.Rescan, true));
+            main.Add(Cmd("\uE710", "フォルダを選んで検索対象に追加…", null, host.PickRootFolder, true));
             foreach (string r in host.CurrentSettings.Roots)
             {
                 string root = r;
-                all.Add(Cmd("", "検索対象から外す: " + root, null, delegate { host.RemoveRoot(root); }, true));
+                main.Add(Cmd("\uE74D", "検索対象から外す: " + root, null, delegate { host.RemoveRoot(root); }, true));
             }
-            all.Add(Cmd("", "設定ファイルを開く", "FolderJump.ini をメモ帳で開きます (保存すると自動で反映)", host.OpenSettingsFile, false));
-            all.Add(Cmd("", "データフォルダを開く", AppPaths.DataDir, host.OpenDataFolder, false));
+            main.Add(Cmd("\uE790", "見た目の設定…", "テーマ・アクセント色・大きさ・透明度などを変えます", delegate { host.SetQueryText(">見た目 "); }, true));
+            main.Add(Cmd("\uE897", "検索の書き方 (ヘルプ)", "拡張子・更新日での絞り込みなど (? と入力しても出ます)", delegate { host.SetQueryText("?"); }, true));
+            main.Add(Cmd("\uE713", "設定ファイルを開く", "FolderJump.ini をメモ帳で開きます (表記ゆれ辞書もここで編集)", host.OpenSettingsFile, false));
+            main.Add(Cmd("\uE8B7", "データフォルダを開く", AppPaths.DataDir, host.OpenDataFolder, false));
             if (host.IsStartupRegistered)
-                all.Add(Cmd("", "Windows 起動時の自動起動をやめる", null, host.ToggleStartup, true));
+                main.Add(Cmd("\uE7E8", "Windows 起動時の自動起動をやめる", null, host.ToggleStartup, true));
             else
-                all.Add(Cmd("", "Windows 起動時に自動で起動する", "スタートアップにショートカットを作ります", host.ToggleStartup, true));
-            all.Add(Cmd("", "履歴をクリア", "「よく使う」の記録を消します (ピン留めは残ります)", host.ClearHistory, true));
-            all.Add(Cmd("", "FolderJump を終了", null, host.Quit, false));
+                main.Add(Cmd("\uE7E8", "Windows 起動時に自動で起動する", "スタートアップにショートカットを作ります", host.ToggleStartup, true));
+            main.Add(Cmd("\uE81C", "履歴をクリア", "「よく使う」の記録を消します (ピン留めは残ります)", host.ClearHistory, true));
+            main.Add(Cmd("\uE711", "FolderJump を終了", null, host.Quit, false));
 
             Query q = Query.Parse(filter);
-            if (q.IsEmpty) return all;
-            var matched = new List<ResultItem>();
+            if (q.Terms.Length == 0) return main;
+            var all = new List<ResultItem>(main);
+            all.AddRange(AppearanceCommands());
+            var first = new List<ResultItem>();
+            var rest = new List<ResultItem>();
             foreach (ResultItem item in all)
             {
                 string key = TextNorm.Key(item.Title + " " + (item.Subtitle ?? ""));
                 bool ok = true;
                 foreach (string term in q.Terms)
                     if (key.IndexOf(term, StringComparison.Ordinal) < 0) { ok = false; break; }
-                if (ok) matched.Add(item);
+                if (!ok) continue;
+                // 名前が入力した語で始まるコマンドを先に (「>設定」なら「設定ファイルを開く」が一番上)
+                if (TextNorm.Key(item.Title).StartsWith(q.Terms[0], StringComparison.Ordinal)) first.Add(item);
+                else rest.Add(item);
             }
-            return matched;
+            first.AddRange(rest);
+            return first;
+        }
+
+        /// <summary>「>見た目」で出る設定の切り替え。選ぶとすぐ反映されて設定ファイルにも保存される。</summary>
+        List<ResultItem> AppearanceCommands()
+        {
+            Settings s = host.CurrentSettings;
+            var list = new List<ResultItem>();
+            string theme = s.Theme.ToLowerInvariant();
+            list.Add(Setting("\uE708", "テーマ: ダーク", "theme", "dark", theme == "dark"));
+            list.Add(Setting("\uE706", "テーマ: ライト", "theme", "light", theme == "light"));
+            list.Add(Setting("\uE7F4", "テーマ: Windows の設定に合わせる", "theme", "system", theme == "system"));
+            string accent = s.Accent.ToLowerInvariant();
+            foreach (string[] p in Settings.AccentPresets)
+                list.Add(Setting("\uE790", "アクセント色: " + p[1], "accent", p[0], accent == p[0] || accent == p[1].ToLowerInvariant()));
+            list.Add(Setting("\uE790", "アクセント色: Windows のアクセント色", "accent", "windows", accent == "windows"));
+            list.Add(Setting("\uE8A3", "表示を大きくする (" + Math.Min(160, s.Zoom + 10) + "%)", "zoom", (s.Zoom + 10).ToString(), false));
+            list.Add(Setting("\uE71F", "表示を小さくする (" + Math.Max(70, s.Zoom - 10) + "%)", "zoom", (s.Zoom - 10).ToString(), false));
+            list.Add(Setting("\uE72C", "表示の大きさを 100% に戻す", "zoom", "100", s.Zoom == 100));
+            list.Add(Setting("\uE740", "幅を広くする (" + Math.Min(1400, s.Width + 80) + ")", "width", (s.Width + 80).ToString(), false));
+            list.Add(Setting("\uE73F", "幅を狭くする (" + Math.Max(560, s.Width - 80) + ")", "width", (s.Width - 80).ToString(), false));
+            list.Add(Setting("\uE72C", "幅を標準 (780) に戻す", "width", "780", s.Width == 780));
+            list.Add(Setting("\uE790", "背景: 不透明", "backgroundopacity", "100", s.BackgroundOpacity == 100));
+            list.Add(Setting("\uE790", "背景: 少し透ける", "backgroundopacity", "90", s.BackgroundOpacity == 90));
+            list.Add(Setting("\uE790", "背景: よく透ける", "backgroundopacity", "78", s.BackgroundOpacity == 78));
+            list.Add(Setting("\uE8FD", s.Compact ? "コンパクト表示をやめる (2 行表示)" : "コンパクト表示にする (1 行表示)", "compact", s.Compact ? "false" : "true", false));
+            list.Add(Setting("\uE768", s.Animations ? "アニメーションを切る" : "アニメーションを付ける", "animations", s.Animations ? "false" : "true", false));
+            return list;
+        }
+
+        ResultItem Setting(string glyph, string title, string key, string value, bool current)
+        {
+            ResultItem item = Cmd(glyph, title, "見た目 (選ぶとすぐ反映)", delegate { host.ChangeSetting(key, value); }, true);
+            if (current) item.Badge = "使用中";
+            return item;
+        }
+
+        /// <summary>「?」で出る検索の書き方の一覧。選ぶと例が入力される。</summary>
+        List<ResultItem> Help()
+        {
+            var list = new List<ResultItem>();
+            list.Add(Example("見積 2024", "スペースで区切ると、すべてを含むものに絞り込み (親フォルダの名前も対象)"));
+            list.Add(Example("見積 .xlsx", "拡張子で絞り込み (.xls だけで .xlsx / .xlsm も)。.* はファイルだけ"));
+            list.Add(Example("営業/", "末尾に / を付けるとフォルダだけ (/ だけなら、すべてのフォルダ)"));
+            list.Add(Example(".pdf @今週", "更新日で絞り込み: @今日 @昨日 @今週 @先週 @今月 @先月 @今年 @去年"));
+            list.Add(Example("@7日", "最近 N 日に更新したもの (@2週 @3か月 @1年 も)。新しい順に並びます"));
+            list.Add(Example("議事録 @2024-05", "年・月・日で指定: @2024 @2024-05 @2024-05-12 @2024年度 @r6"));
+            list.Add(Example("契約 @2024-04以降", "以降 / 以前 を付けると、その日より後 / 前"));
+            list.Add(Example("議事録 -旧", "- を付けた言葉を含むものを除外"));
+            list.Add(Example("R6 見積", "和暦と西暦は同じものとして探します (2024 = 令和6 = R6)"));
+            list.Add(Example("見積もり", "表記ゆれ辞書: 見積 / 見積り / お見積 なども探します (> 設定ファイル で追加)"));
+            list.Add(Example(">", "コマンド (再スキャン・見た目の設定など)"));
+            return list;
+        }
+
+        ResultItem Example(string example, string description)
+        {
+            string text = example;
+            ResultItem item = Cmd("\uE721", example, description, delegate { host.SetQueryText(text); }, true);
+            item.Badge = "例";
+            return item;
         }
 
         static ResultItem Cmd(string glyph, string title, string subtitle, Action action, bool keepOpen)
@@ -297,15 +371,16 @@ namespace FolderJump
         }
 
         /// <summary>名前のどこがキーワードに一致したか (正規化で長さが変わる名前は諦める)。</summary>
-        public static int[] Highlight(string name, string key, string[] terms)
+        public static int[] Highlight(string name, string key, string[][] alts)
         {
-            if (name == null || key == null || name.Length != key.Length || terms.Length == 0) return null;
+            if (name == null || key == null || name.Length != key.Length || alts.Length == 0) return null;
             var marks = new bool[name.Length];
             bool any = false;
-            foreach (string term in terms)
+            foreach (string[] a in alts)
             {
-                int pos = key.IndexOf(term, StringComparison.Ordinal);
-                if (pos < 0) continue;
+                int pos;
+                string term = FileIndex.FirstMatch(key, a, out pos);
+                if (term == null) continue;
                 for (int i = pos; i < pos + term.Length; i++) marks[i] = true;
                 any = true;
             }

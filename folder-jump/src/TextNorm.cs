@@ -60,40 +60,6 @@ namespace FolderJump
         }
     }
 
-    /// <summary>入力された検索語。スペース区切りで AND、"-語" で除外。</summary>
-    internal sealed class Query
-    {
-        public string[] Terms = new string[0];
-        public string[] Excludes = new string[0];
-
-        public bool IsEmpty { get { return Terms.Length == 0; } }
-
-        public static Query Parse(string text)
-        {
-            var q = new Query();
-            if (string.IsNullOrEmpty(text)) return q;
-            string norm = TextNorm.Key(text);
-            var terms = new List<string>();
-            var excl = new List<string>();
-            foreach (string raw in norm.Split(new[] { ' ', '\t', '\\', '/', '　' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                if (raw.Length > 1 && raw[0] == '-')
-                {
-                    string e = raw.Substring(1);
-                    if (!excl.Contains(e)) excl.Add(e);
-                }
-                else if (raw != "-" && !terms.Contains(raw))
-                {
-                    terms.Add(raw);
-                }
-                if (terms.Count >= 20) break;
-            }
-            q.Terms = terms.ToArray();
-            q.Excludes = excl.ToArray();
-            return q;
-        }
-    }
-
     /// <summary>貼り付けられた文字列がパスなら取り出す。</summary>
     internal static class PathInput
     {
