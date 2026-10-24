@@ -1,0 +1,972 @@
+<title>FolderJump デモ</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+JP:wght@400;600&display=swap">
+<style>
+  /* Layout: a dim "desktop" stage holding a mock Explorer, with the launcher floating over it; a short guide below. */
+  :root {
+    color-scheme: dark;
+    --desk: #0a0e16;
+    --page: #0d1119;
+    --ink: #e9edf5;
+    --muted: #8c94a8;
+    --faint: #586073;
+    --accent: #38bdf8;
+    --accent-2: #a78bfa;
+    --match: #67e8f9;
+    --ok: #34d399;
+    --card: rgba(17, 19, 24, 0.96);
+    --line: rgba(255, 255, 255, 0.10);
+    --hover: rgba(255, 255, 255, 0.06);
+    --sel-a: rgba(56, 189, 248, 0.19);
+    --sel-b: rgba(167, 139, 250, 0.09);
+    --ex-bg: #1c1c1c;
+    --ex-bar: #262626;
+    --ex-line: #353535;
+    --ex-sel: #2d3b4e;
+    --ex-hover: #2a2c30;
+    --ex-text: #e6e6e6;
+    --ex-dim: #9b9b9b;
+    --font-ui: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", sans-serif;
+    --font-page: "IBM Plex Sans JP", "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  html, body { background: var(--page); color: var(--ink); }
+  body {
+    font-family: var(--font-page);
+    font-size: 14px;
+    line-height: 1.6;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 20px 40px;
+  }
+  .page { max-width: 1120px; margin: 0 auto; display: grid; gap: 18px; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  kbd {
+    font-family: var(--font-mono); font-size: 11.5px; padding: 1px 6px; border-radius: 5px;
+    border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.04); color: var(--ink); white-space: nowrap;
+  }
+
+  /* ---------- page header ---------- */
+  .top { display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: center; justify-content: space-between; }
+  .brand { display: flex; gap: 14px; align-items: center; min-width: 0; }
+  .brand img { width: 44px; height: 44px; flex: none; }
+  .brand h1 { margin: 0; font-size: 22px; line-height: 1.2; font-weight: 600; letter-spacing: .01em; }
+  .brand p { margin: 2px 0 0; color: var(--muted); font-size: 13px; text-wrap: balance; }
+  .data { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .dataset { color: var(--muted); font-size: 12.5px; }
+  .dataset b { color: var(--ink); font-weight: 600; }
+  .btn {
+    border: 1px solid rgba(56,189,248,.45); background: rgba(56,189,248,.10); color: var(--ink);
+    padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .btn:hover { background: rgba(56,189,248,.18); }
+  .btn.ghost { border-color: var(--line); background: transparent; }
+
+  /* ---------- desktop stage ---------- */
+  .desk {
+    position: relative; height: 660px; border-radius: 14px; overflow: hidden;
+    background:
+      radial-gradient(60% 70% at 18% 100%, rgba(30, 64, 175, .55), transparent 70%),
+      radial-gradient(50% 60% at 85% 0%, rgba(91, 33, 182, .45), transparent 70%),
+      radial-gradient(40% 50% at 70% 85%, rgba(8, 145, 178, .35), transparent 70%),
+      var(--desk);
+    border: 1px solid var(--line);
+  }
+
+  /* ---------- mock Explorer (Windows 11, dark) ---------- */
+  .explorer {
+    position: absolute; inset: 22px 26px 22px 26px; display: flex; flex-direction: column;
+    background: var(--ex-bg); color: var(--ex-text); border: 1px solid var(--ex-line); border-radius: 9px;
+    font-family: var(--font-ui); font-size: 13px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.45);
+  }
+  .ex-tabs { display: flex; align-items: flex-end; gap: 4px; padding: 7px 10px 0; background: #141414; min-width: 0; }
+  .ex-tab {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 8px 8px 0 0; background: var(--ex-bar);
+    min-width: 0; max-width: 260px;
+  }
+  .ex-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ex-tab .x { color: var(--ex-dim); margin-left: 6px; }
+  .ex-plus { color: var(--ex-dim); padding: 6px 8px; }
+  .ex-bar { display: flex; gap: 6px; align-items: center; padding: 6px 10px; background: var(--ex-bar); border-bottom: 1px solid var(--ex-line); min-width: 0; }
+  .ex-nav {
+    width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--ex-text); cursor: pointer;
+    display: grid; place-items: center; flex: none;
+  }
+  .ex-nav:hover { background: var(--ex-hover); }
+  .ex-nav:disabled { color: #555; cursor: default; background: transparent; }
+  .ex-nav svg { width: 16px; height: 16px; }
+  .address {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; height: 30px; padding: 0 8px;
+    background: #1d1d1d; border: 1px solid var(--ex-line); border-radius: 6px; overflow: hidden; white-space: nowrap;
+    transition: box-shadow .4s, border-color .4s;
+  }
+  .address .seg { border: 0; background: transparent; color: var(--ex-text); padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .address .seg:hover { background: var(--ex-hover); }
+  .address .chev { color: var(--ex-dim); font-size: 11px; }
+  .explorer.jumped .address { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(56,189,248,.25); }
+  .ex-find {
+    width: 190px; height: 30px; flex: none; display: flex; align-items: center; padding: 0 10px; color: var(--ex-dim);
+    background: #1d1d1d; border: 1px solid var(--ex-line); border-radius: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  .ex-body { flex: 1; display: grid; grid-template-columns: 190px 1fr; min-height: 0; }
+  .ex-side { border-right: 1px solid var(--ex-line); padding: 8px 6px; overflow: hidden; }
+  .ex-side div { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px; color: var(--ex-text); white-space: nowrap; }
+  .ex-side div.on { background: var(--ex-hover); }
+  .ex-side svg { width: 16px; height: 16px; flex: none; }
+  .ex-side hr { border: 0; border-top: 1px solid var(--ex-line); margin: 6px 4px; }
+  .ex-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .ex-head, .ex-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px 210px; gap: 12px; align-items: center; }
+  .ex-head { padding: 6px 14px; color: var(--ex-dim); border-bottom: 1px solid var(--ex-line); font-size: 12px; }
+  .ex-list { flex: 1; overflow-y: auto; padding: 4px 6px; }
+  .ex-row { padding: 4px 8px; border-radius: 5px; cursor: default; user-select: none; border: 1px solid transparent; }
+  .ex-row:hover { background: var(--ex-hover); }
+  .ex-row.sel { background: var(--ex-sel); border-color: #4a6584; }
+  .ex-row .nm { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .ex-row .nm span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ex-row .nm svg { width: 18px; height: 18px; flex: none; }
+  .ex-row .dt, .ex-row .ty { color: var(--ex-dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .ex-empty { color: var(--ex-dim); text-align: center; padding: 40px 0; }
+  .ex-status { padding: 4px 14px; color: var(--ex-dim); font-size: 12px; border-top: 1px solid var(--ex-line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ---------- launcher (same look as the Windows app) ---------- */
+  .launcher {
+    position: absolute; top: 58px; left: 50%; transform: translateX(-50%); z-index: 5;
+    width: min(780px, calc(100% - 32px)); padding: 1px; border-radius: 16px;
+    background: linear-gradient(90deg, rgba(56,189,248,.45), rgba(167,139,250,.45));
+    box-shadow: 0 20px 56px rgba(0,0,0,.6), 0 2px 10px rgba(0,0,0,.4);
+    animation: pop .19s ease-out;
+  }
+  .launcher[hidden] { display: none; }
+  @keyframes pop { from { opacity: 0; translate: 0 -10px; } to { opacity: 1; translate: 0 0; } }
+  .frame { border-radius: 15px; background: var(--card); overflow: hidden; font-family: var(--font-ui); color: #f1f3f8; }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 13px 18px 11px 20px; }
+  .bar > svg { width: 20px; height: 20px; color: var(--accent); flex: none; }
+  .chips { display: flex; flex: none; max-width: 45%; }
+  .chip {
+    display: flex; align-items: center; gap: 6px; padding: 3px 10px 4px 9px; border-radius: 8px; font-size: 13px; min-width: 0;
+    background: rgba(56,189,248,.12); border: 1px solid rgba(56,189,248,.33); white-space: nowrap;
+  }
+  .chip span { overflow: hidden; text-overflow: ellipsis; }
+  .chip svg { width: 13px; height: 13px; flex: none; }
+  #q {
+    flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: #f1f3f8; font: inherit; font-size: 21px;
+    caret-color: var(--accent); padding: 2px 0;
+  }
+  #q::placeholder { color: #4e5566; font-size: 15px; }
+  #q::selection { background: rgba(56,189,248,.33); }
+  .count { color: #7c8597; font-size: 12px; white-space: nowrap; }
+  .line { position: relative; height: 1.5px; margin: 0 14px; overflow: hidden; background: linear-gradient(90deg, rgba(56,189,248,.33), rgba(167,139,250,0)); }
+  .glow {
+    position: absolute; top: 0; left: 0; width: 260px; height: 100%; display: none;
+    background: linear-gradient(90deg, rgba(56,189,248,0), #38bdf8 55%, #a78bfa 80%, rgba(167,139,250,0));
+    animation: sweep 1.7s linear infinite;
+  }
+  .scanning .glow { display: block; }
+  @keyframes sweep { from { transform: translateX(-260px); } to { transform: translateX(800px); } }
+  .results { max-height: 470px; overflow-y: auto; padding: 6px 8px; scrollbar-width: none; }
+  .results::-webkit-scrollbar { display: none; }
+  .hdr { font-size: 11px; font-weight: 600; color: #7c8597; padding: 10px 12px 3px; letter-spacing: .04em; }
+  .row {
+    position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center;
+    padding: 7px 12px; margin: 1px 0; border-radius: 10px; cursor: pointer;
+  }
+  .row:hover { background: var(--hover); }
+  .row.sel { background: linear-gradient(90deg, var(--sel-a), var(--sel-b)); }
+  .row.sel::before {
+    content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 2px;
+    background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  }
+  .row .ic { width: 22px; height: 22px; display: grid; place-items: center; }
+  .row .ic svg { width: 22px; height: 22px; }
+  .row .ic.cmd svg { width: 18px; height: 18px; color: var(--accent); }
+  .tx { display: flex; flex-direction: column; min-width: 0; }
+  .tx .t { font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tx .t mark { background: transparent; color: var(--match); font-weight: 600; }
+  .tx .s { font-size: 11.5px; color: #7c8597; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rt { display: flex; align-items: center; gap: 8px; margin-left: 14px; color: #7c8597; font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .rt svg { width: 12px; height: 12px; color: var(--accent-2); }
+  .empty { padding: 10px 28px 18px; }
+  .empty b { display: block; font-size: 15px; font-weight: 600; }
+  .empty p { margin: 6px 0 0; color: #7c8597; font-size: 12.5px; white-space: pre-line; line-height: 1.65; }
+  .foot {
+    display: flex; gap: 10px 16px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    padding: 9px 16px 10px 18px; border-top: 1px solid var(--line); background: rgba(255,255,255,.04);
+  }
+  .status, .toast { font-size: 11.5px; display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { color: #7c8597; }
+  .status i { width: 7px; height: 7px; border-radius: 50%; background: #4e5566; flex: none; }
+  .status.ready i { background: var(--ok); }
+  .scanning .status i { background: var(--accent); }
+  .toast { color: var(--match); }
+  .toast[hidden], .status[hidden] { display: none; }
+  .hints { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .hint { display: flex; align-items: center; gap: 5px; border: 0; background: transparent; padding: 0; cursor: pointer; color: #7c8597; font-size: 11px; font-family: var(--font-ui); }
+  .hint .k { border: 1px solid rgba(255,255,255,.2); border-radius: 4px; padding: 0 5px 1px; color: #b4bccb; font-size: 10.5px; }
+  .hint:hover { color: var(--ink); }
+
+  .summon {
+    position: absolute; right: 40px; bottom: 40px; z-index: 6; display: flex; gap: 8px; align-items: center;
+    border: 1px solid rgba(56,189,248,.5); background: rgba(13, 17, 25, .92); color: var(--ink); border-radius: 10px;
+    padding: 8px 14px; cursor: pointer; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  .summon[hidden] { display: none; }
+  .desk-toast {
+    position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 7; max-width: calc(100% - 48px);
+    background: rgba(13,17,25,.95); border: 1px solid rgba(56,189,248,.45); border-radius: 10px; padding: 8px 14px;
+    font-size: 13px; color: var(--ink); box-shadow: 0 8px 24px rgba(0,0,0,.5); font-family: var(--font-ui);
+  }
+  .desk-toast[hidden] { display: none; }
+
+  /* ---------- guide ---------- */
+  .guide { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; }
+  .panel { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; background: rgba(255,255,255,.02); min-width: 0; }
+  .panel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; letter-spacing: .06em; color: var(--muted); }
+  .tries { display: flex; flex-wrap: wrap; gap: 8px; }
+  .try {
+    display: grid; gap: 1px; text-align: left; border: 1px solid var(--line); background: rgba(255,255,255,.03);
+    border-radius: 9px; padding: 7px 11px; cursor: pointer; min-width: 0; max-width: 100%;
+  }
+  .try:hover { border-color: rgba(56,189,248,.5); }
+  .try code { font-family: var(--font-mono); font-size: 13px; color: var(--match); overflow-wrap: anywhere; }
+  .try span { font-size: 11.5px; color: var(--muted); }
+  .keys { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .keys td { padding: 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .keys td:first-child { color: var(--muted); padding-right: 12px; white-space: nowrap; }
+  .keys tr:last-child td { border-bottom: 0; }
+  .notes { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: 13px; display: grid; gap: 6px; }
+  .notes b { color: var(--ink); font-weight: 600; }
+  .full { grid-column: 1 / -1; }
+
+  dialog {
+    border: 1px solid rgba(56,189,248,.4); border-radius: 12px; background: #11141b; color: var(--ink); padding: 0;
+    width: min(640px, calc(100vw - 32px)); box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); font-family: var(--font-ui); }
+  dialog pre { margin: 0; padding: 14px 16px; max-height: 60vh; overflow: auto; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6; color: #cfd6e4; }
+
+  @media (max-width: 760px) {
+    .desk { height: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+    .launcher { position: relative; top: auto; left: auto; transform: none; width: 100%; order: -1; }
+    .explorer { position: relative; inset: auto; height: 440px; }
+    .ex-body { grid-template-columns: 1fr; }
+    .ex-side, .ex-find, .ex-head span:nth-child(3), .ex-row .ty { display: none; }
+    .ex-head, .ex-row { grid-template-columns: minmax(0, 1fr) 118px; }
+    .summon { position: relative; right: auto; bottom: auto; align-self: flex-start; order: -1; }
+    .guide { grid-template-columns: 1fr; }
+    #q { font-size: 18px; }
+    .chips { max-width: 40%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .launcher { animation: none; }
+    .glow { animation: none; left: 30%; }
+    .address { transition: none; }
+  }
+</style>
+
+<div class="page">
+  <header class="top">
+    <div class="brand">
+      <img src="icon.png" alt="">
+      <div>
+        <h1>FolderJump</h1>
+        <p>ファイルサーバーのフォルダへキーボードで一瞬で飛ぶランチャー。Windows 版と同じ画面・同じ検索ロジックをブラウザで試せます。</p>
+      </div>
+    </div>
+    <div class="data">
+      <span class="dataset" id="datasetLabel"></span>
+      <button class="btn" id="loadBtn" type="button">自分のフォルダで試す</button>
+      <button class="btn ghost" id="sampleBtn" type="button" hidden>サンプルに戻す</button>
+      <input type="file" id="dirInput" webkitdirectory directory multiple hidden>
+    </div>
+  </header>
+
+  <section class="desk" id="desk" aria-label="デモ画面">
+    <div class="explorer" id="explorer">
+      <div class="ex-tabs">
+        <div class="ex-tab"><span class="ico" id="tabIcon"></span><span id="tabTitle">share</span><span class="x">✕</span></div>
+        <div class="ex-plus">＋</div>
+      </div>
+      <div class="ex-bar">
+        <button class="ex-nav" id="exBack" type="button" title="戻る" aria-label="戻る"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></button>
+        <button class="ex-nav" id="exUp" type="button" title="上へ" aria-label="上の階層へ"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+        <div class="address" id="address"></div>
+        <div class="ex-find" id="exFind">share の検索</div>
+      </div>
+      <div class="ex-body">
+        <nav class="ex-side" aria-hidden="true">
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="#9b9b9b" stroke-width="1.8"><path d="M3 11 12 4l9 7v9H3z"/></svg>ホーム</div>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="#5ea0ef" stroke-width="1.8"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/></svg>デスクトップ</div>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="#9b9b9b" stroke-width="1.8"><path d="M6 3h8l4 4v14H6z"/></svg>ドキュメント</div>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="#3fb37f" stroke-width="1.8"><path d="M12 4v12M6 10l6 6 6-6M5 20h14"/></svg>ダウンロード</div>
+          <hr>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="#9b9b9b" stroke-width="1.8"><rect x="3" y="5" width="18" height="11" rx="1.5"/><path d="M9 20h6M12 16v4"/></svg>PC</div>
+          <div class="on"><svg viewBox="0 0 24 24" fill="none" stroke="#5ea0ef" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c3 3 3 14 0 17M12 3.5c-3 3-3 14 0 17"/></svg><span id="sideRoot">ネットワーク</span></div>
+        </nav>
+        <div class="ex-main">
+          <div class="ex-head"><span>名前</span><span>更新日時</span><span>種類</span></div>
+          <div class="ex-list" id="exList"></div>
+        </div>
+      </div>
+      <div class="ex-status" id="exStatus"></div>
+    </div>
+
+    <div class="launcher" id="launcher" role="dialog" aria-label="FolderJump">
+      <div class="frame" id="frame">
+        <div class="bar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+          <div class="chips" id="chips"></div>
+          <input id="q" type="text" autocomplete="off" spellcheck="false" aria-label="検索"
+                 placeholder="フォルダ名・ファイル名で検索  (スペースで絞り込み / パスの貼り付けも OK)">
+          <span class="count" id="count"></span>
+        </div>
+        <div class="line"><i class="glow"></i></div>
+        <div class="results" id="results" role="listbox" aria-label="検索結果"></div>
+        <div class="empty" id="empty" hidden><b id="emptyTitle"></b><p id="emptyBody"></p></div>
+        <div class="foot">
+          <div class="status" id="status"><i></i><span id="statusText"></span></div>
+          <div class="toast" id="toast" hidden></div>
+          <div class="hints">
+            <button class="hint" type="button" data-act="open"><span class="k">Enter</span>開く</button>
+            <button class="hint" type="button" data-act="reveal"><span class="k">Shift+Enter</span>場所</button>
+            <button class="hint" type="button" data-act="into"><span class="k">Tab</span>中へ</button>
+            <button class="hint" type="button" data-act="pin"><span class="k">Ctrl+D</span>ピン</button>
+            <button class="hint" type="button" data-act="copy"><span class="k">Ctrl+C</span>コピー</button>
+            <button class="hint" type="button" data-act="cmd"><span class="k">&gt;</span>コマンド</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="summon" id="summon" type="button" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+      ランチャーを開く <kbd id="summonKey">Ctrl K</kbd>
+    </button>
+    <div class="desk-toast" id="deskToast" role="status" hidden></div>
+  </section>
+
+  <section class="guide">
+    <div class="panel">
+      <h2>試してみる (押すと入力されます)</h2>
+      <div class="tries" id="tries">
+        <button class="try" type="button" data-q="見積 青葉 2024"><code>見積 青葉 2024</code><span>親フォルダの名前も使って絞り込む</span></button>
+        <button class="try" type="button" data-q="みつもり"><code>みつもり</code><span>ひらがなでカタカナの名前にも一致</span></button>
+        <button class="try" type="button" data-q="aws"><code>aws</code><span>半角で全角の名前 (ＡＷＳ) にも一致</span></button>
+        <button class="try" type="button" data-q="議事録 -2024"><code>議事録 -2024</code><span>- を付けた言葉は除外</span></button>
+        <button class="try" type="button" data-q="テスト仕様"><code>テスト仕様</code><span>Tab でその場所の中へ入れる</span></button>
+        <button class="try" type="button" data-q="\\fileserver\share\05_開発部"><code>\\fileserver\share\05_開発部</code><span>メールのパスを貼って一発で開く</span></button>
+        <button class="try" type="button" data-q=">"><code>&gt;</code><span>コマンド (再スキャンなど)</span></button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>キー操作</h2>
+      <table class="keys">
+        <tr><td>呼び出す</td><td>Windows 版 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> ／ デモ <kbd id="openKey">Ctrl</kbd>+<kbd>K</kbd> か <kbd>/</kbd></td></tr>
+        <tr><td>開く</td><td><kbd>Enter</kbd> (直前のエクスプローラーがそのまま移動)</td></tr>
+        <tr><td>場所を開く</td><td><kbd>Shift</kbd>+<kbd>Enter</kbd> (ファイルを選択した状態で)</td></tr>
+        <tr><td>中へ ／ 上へ</td><td><kbd>Tab</kbd> ／ <kbd>Shift</kbd>+<kbd>Tab</kbd>・空欄で <kbd>Backspace</kbd></td></tr>
+        <tr><td>ピン留め</td><td><kbd>Ctrl</kbd>+<kbd>D</kbd> (空欄の時に一番上に並ぶ)</td></tr>
+        <tr><td>パスをコピー</td><td><kbd>Ctrl</kbd>+<kbd>C</kbd> (同僚にパスを送る時に)</td></tr>
+        <tr><td>閉じる</td><td><kbd>Esc</kbd></td></tr>
+      </table>
+    </div>
+    <div class="panel full">
+      <h2>Windows 版との違い</h2>
+      <ul class="notes">
+        <li><b>エクスプローラーは模型です。</b>ブラウザからは本物のエクスプローラーやファイルを開けないため、画面の中の模型が移動します。Windows 版では直前に使っていたエクスプローラー (タブ) がその場で移動し、ファイルは Excel などで開きます。</li>
+        <li><b>検索の中身は同じです。</b>並び順の計算、全角/半角・ひらがな/カタカナの同一視、「よく使う」の学習、Tab での絞り込みは Windows 版のコードをそのまま移植しています。模型のエクスプローラーで開いたフォルダも「よく使う」に学習されます。</li>
+        <li><b>「自分のフォルダで試す」</b>で選んだフォルダの中身は、このページの中だけで処理されます。どこにも送信されません。ブラウザの仕様で、空のフォルダは読み込まれません。</li>
+        <li>最初から入っている「ピン留め」「よく使う」はデモ用の例です。デモで付けたピンや履歴はこのブラウザにだけ保存されます。</li>
+      </ul>
+    </div>
+  </section>
+</div>
+
+<dialog id="iniDialog" aria-label="設定ファイル">
+  <div class="dlg-head"><span>FolderJump.ini (Windows 版の設定ファイルの例)</span><button class="btn ghost" type="button" id="iniClose">閉じる</button></div>
+  <pre id="iniText"></pre>
+</dialog>
+
+<script src="engine.js"></script>
+<script>
+(function () {
+  'use strict';
+  var FJ = window.FJ;
+  var $ = function (id) { return document.getElementById(id); };
+  var isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  var MOD = isMac ? '⌘' : 'Ctrl';
+
+  var ui = {
+    desk: $('desk'), launcher: $('launcher'), frame: $('frame'), q: $('q'), chips: $('chips'), count: $('count'),
+    results: $('results'), empty: $('empty'), emptyTitle: $('emptyTitle'), emptyBody: $('emptyBody'),
+    status: $('status'), statusText: $('statusText'), toast: $('toast'), summon: $('summon'), deskToast: $('deskToast'),
+    explorer: $('explorer'), address: $('address'), exList: $('exList'), exStatus: $('exStatus'), exBack: $('exBack'), exUp: $('exUp'),
+    tabTitle: $('tabTitle'), tabIcon: $('tabIcon'), exFind: $('exFind'), sideRoot: $('sideRoot'),
+    datasetLabel: $('datasetLabel'), loadBtn: $('loadBtn'), sampleBtn: $('sampleBtn'), dirInput: $('dirInput')
+  };
+
+  var S = {
+    index: null, dataset: 'sample', usage: null, engine: null,
+    items: [], selected: -1, scope: -1, scopeIndex: null, scopePath: null, renderedIndex: null,
+    open: true, scanning: false, scanCount: 0, timer: 0, toastTimer: 0, deskToastTimer: 0,
+    ex: { node: 0, back: [], selected: -1 }
+  };
+
+  // ------------------------------------------------------------ icons
+  var EXT = {
+    xlsx: ['#1D6F42', 'X'], xls: ['#1D6F42', 'X'], csv: ['#1D6F42', 'CSV'], docx: ['#2B579A', 'W'], doc: ['#2B579A', 'W'],
+    pptx: ['#C43E1C', 'P'], ppt: ['#C43E1C', 'P'], pdf: ['#D93025', 'PDF'], png: ['#7C5CD6', 'IMG'], jpg: ['#7C5CD6', 'IMG'],
+    jpeg: ['#7C5CD6', 'IMG'], gif: ['#7C5CD6', 'IMG'], zip: ['#8D6E63', 'ZIP'], txt: ['#5F6B7A', 'TXT'], md: ['#5F6B7A', 'MD']
+  };
+  var TYPES = {
+    xlsx: 'Microsoft Excel ワークシート', docx: 'Microsoft Word 文書', pptx: 'Microsoft PowerPoint プレゼンテーション',
+    pdf: 'PDF ドキュメント', png: 'PNG ファイル', jpg: 'JPEG ファイル', txt: 'テキスト ドキュメント', md: 'Markdown ファイル', zip: '圧縮 (ZIP) フォルダー'
+  };
+  var FOLDER_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6.5A2.5 2.5 0 0 1 4.5 4h4.2c.6 0 1.2.25 1.6.7L11.6 6h7.9A2.5 2.5 0 0 1 22 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 17.5z" fill="#E3A21A"/><path d="M2 9.2h20v8.3a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 17.5z" fill="#FFC83D"/></svg>';
+  function ext(name) { var m = /\.([^.\\\/]+)$/.exec(name || ''); return m ? m[1].toLowerCase() : ''; }
+  function fileSvg(name) {
+    var e = EXT[ext(name)] || ['#6B7280', ''];
+    var label = e[1], fs = label.length >= 3 ? 4.4 : 6.2;
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8.2L20 7.8V20a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#E9EDF3"/><path d="M14.2 2v5.8H20" fill="#C5CDD8"/>'
+      + (label ? '<rect x="2" y="11" width="13.5" height="8.4" rx="1.6" fill="' + e[0] + '"/><text x="8.75" y="' + (label.length >= 3 ? 16.9 : 17.4) + '" font-size="' + fs + '" font-weight="700" text-anchor="middle" fill="#fff" font-family="Segoe UI, Arial, sans-serif">' + label + '</text>' : '')
+      + '</svg>';
+  }
+  var GLYPH = {
+    add: '<path d="M12 5v14M5 12h14"/>',
+    refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
+    folderPlus: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10.5v6M9 13.5h6"/>',
+    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+    power: '<path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/>',
+    history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/>',
+    pinOff: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/><path d="M3 3l18 18"/>'
+  };
+  function glyphSvg(name) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (GLYPH[name] || GLYPH.add) + '</svg>';
+  }
+  var STAR = '<svg viewBox="0 0 24 24" aria-label="ピン留め"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z" fill="currentColor"/></svg>';
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  // ------------------------------------------------------------ data set
+  var STORE = 'folderjump-demo-usage:';
+  function loadUsage(id) {
+    var u = new FJ.UsageStore();
+    try {
+      var raw = localStorage.getItem(STORE + id);
+      if (raw) { u.load(JSON.parse(raw)); return u; }
+    } catch (e) { /* 保存できない環境でも動かす */ }
+    if (id === 'sample') seedSample(u);
+    return u;
+  }
+  function saveUsage() {
+    try { localStorage.setItem(STORE + S.dataset, JSON.stringify(S.usage.toJSON())); } catch (e) { /* ignore */ }
+  }
+  function seedSample(u) {
+    var now = Date.now(), H = 3600000, base = '\\\\fileserver\\share\\';
+    var prj = null;
+    for (var i = 0; i < S.index.count; i++) if (S.index.name[i].indexOf('在庫管理システム刷新') >= 0) { prj = S.index.fullPath(i); break; }
+    var history = [
+      { path: base + '02_営業部\\顧客\\01_青葉商事', isDir: true, count: 6, last: now - 2 * H },
+      { path: base + '03_経理部\\経費精算', isDir: true, count: 2, last: now - 3 * 24 * H },
+      { path: base + '01_総務部\\規程類\\就業規則.docx', isDir: false, count: 2, last: now - 5 * 24 * H }
+    ];
+    if (prj) history.splice(1, 0, { path: prj, isDir: true, count: 4, last: now - 26 * H });
+    u.load({ history: history, pins: [{ path: base + '99_共有\\テンプレート', isDir: true }] });
+  }
+
+  var host = {
+    roots: function () { return S.index ? S.index.roots.slice() : []; },
+    commands: function () {
+      var c = [
+        cmd('refresh', '今すぐ再スキャン', 'インデックスを最新の状態に作り直します', 'rescan', true),
+        cmd('folderPlus', '自分のフォルダで試す…', 'このパソコンのフォルダを選んで検索 (どこにも送信されません)', 'loadFolder', true)
+      ];
+      if (S.dataset !== 'sample') c.push(cmd('undo', 'サンプルデータに戻す', null, 'sample', true));
+      c.push(cmd('gear', '設定ファイルを開く', 'FolderJump.ini の中身を表示します', 'settings', true));
+      c.push(cmd('power', 'Windows 起動時に自動で起動する', 'スタートアップにショートカットを作ります (Windows 版)', 'startup', true));
+      c.push(cmd('history', '履歴をクリア', '「よく使う」の記録を消します (ピン留めは残ります)', 'clearHistory', true));
+      c.push(cmd('pinOff', 'ピン留めをすべて外す', null, 'clearPins', true));
+      return c;
+    }
+  };
+  function cmd(glyph, title, subtitle, action, keepOpen) {
+    return { kind: 'command', glyph: glyph, title: title, subtitle: subtitle, action: action, keepOpen: keepOpen };
+  }
+
+  function useIndex(index, id, label) {
+    S.index = index;
+    S.dataset = id;
+    S.usage = loadUsage(id);
+    S.engine = new FJ.QueryEngine(host, S.usage);
+    S.builtAt = Date.now();
+    S.ex = { node: 0, back: [], selected: -1 };
+    clearScope();
+    ui.datasetLabel.innerHTML = label;
+    ui.sampleBtn.hidden = id === 'sample';
+    ui.exFind.textContent = FJ.lastSegment(index.roots[0] || '') + ' の検索';
+    ui.sideRoot.textContent = id === 'sample' ? 'ネットワーク' : FJ.lastSegment(index.roots[0] || 'フォルダ');
+    exRender();
+    setStatus();
+    ui.q.value = '';
+    runQuery();
+  }
+
+  // ------------------------------------------------------------ launcher
+  function showLauncher(text) {
+    if (!S.open) {
+      S.open = true;
+      ui.launcher.hidden = false;
+      ui.summon.hidden = true;
+      clearScope();
+    }
+    if (typeof text === 'string') ui.q.value = text;
+    ui.q.focus();
+    if (typeof text !== 'string') ui.q.select();
+    runQuery();
+  }
+  function hideLauncher() {
+    if (!S.open) return;
+    S.open = false;
+    ui.launcher.hidden = true;
+    ui.summon.hidden = false;
+  }
+
+  function schedule() {
+    clearTimeout(S.timer);
+    S.timer = setTimeout(runQuery, 30);
+  }
+  function runQuery() {
+    clearTimeout(S.timer);
+    S.timer = 0;
+    var idx = S.scope >= 0 && S.scopeIndex ? S.scopeIndex : S.index;
+    var items = S.engine.compute(ui.q.value, S.scope, idx);
+    S.renderedIndex = idx;
+    render(items, ui.q.value);
+  }
+
+  function titleHtml(it) {
+    var t = it.title || '', h = it.highlights;
+    if (!h || h.length < 2) return esc(t);
+    var out = '', pos = 0;
+    for (var i = 0; i + 1 < h.length; i += 2) {
+      var s = h[i], len = h[i + 1];
+      if (s < pos || s + len > t.length) continue;
+      out += esc(t.slice(pos, s)) + '<mark>' + esc(t.substr(s, len)) + '</mark>';
+      pos = s + len;
+    }
+    return out + esc(t.slice(pos));
+  }
+
+  function render(items, text) {
+    S.items = items;
+    S.selected = -1;
+    var html = [];
+    items.forEach(function (it, i) {
+      if (it.kind === 'header') { html.push('<div class="hdr">' + esc(it.title) + '</div>'); return; }
+      var icon = it.kind === 'command'
+        ? '<span class="ic cmd">' + glyphSvg(it.glyph) + '</span>'
+        : '<span class="ic">' + (it.isDir ? FOLDER_SVG : fileSvg(it.title)) + '</span>';
+      html.push('<div class="row" role="option" id="r' + i + '" data-i="' + i + '" title="' + esc(it.path || '') + '">' + icon
+        + '<span class="tx"><span class="t">' + titleHtml(it) + '</span>' + (it.subtitle ? '<span class="s">' + esc(it.subtitle) + '</span>' : '') + '</span>'
+        + '<span class="rt">' + (it.pinned ? STAR : '') + (it.badge ? '<span>' + esc(it.badge) + '</span>' : '') + '</span></div>');
+    });
+    ui.results.innerHTML = html.join('');
+    ui.results.scrollTop = 0;
+    var target = firstSelectable();
+    if (S.pendingSelectNode >= 0) {
+      for (var i = 0; i < items.length; i++) if (items[i].node === S.pendingSelectNode && items[i].kind !== 'header') { target = i; break; }
+      S.pendingSelectNode = -1;
+    }
+    if (target >= 0) select(target);
+    var n = items.filter(function (x) { return x.kind === 'entry'; }).length;
+    ui.count.textContent = n === 0 ? '' : n >= FJ.MAX_RESULTS ? n + '+ 件' : n + ' 件';
+    updateEmpty(text);
+  }
+
+  function updateEmpty(text) {
+    var typed = text.trim().length > 0, title = null, body = '';
+    if (S.items.length === 0) {
+      if (S.scope >= 0 && !typed) { title = 'このフォルダは空です'; body = 'Backspace で上の階層に戻れます。'; }
+      else if (typed) {
+        title = '見つかりませんでした';
+        body = '言葉の一部だけ (例: 「見積 2024」) や、親フォルダの名前を足してみてください。\n「-旧」のように - を付けるとその言葉を含むものを除外できます。';
+      }
+    }
+    ui.empty.hidden = !title;
+    if (title) { ui.emptyTitle.textContent = title; ui.emptyBody.textContent = body; }
+  }
+
+  function firstSelectable() {
+    for (var i = 0; i < S.items.length; i++) if (S.items[i].kind !== 'header') return i;
+    return -1;
+  }
+  function select(i) {
+    if (i < 0 || i >= S.items.length || S.items[i].kind === 'header') return;
+    var old = document.getElementById('r' + S.selected);
+    if (old) { old.classList.remove('sel'); old.setAttribute('aria-selected', 'false'); }
+    S.selected = i;
+    var el = document.getElementById('r' + i);
+    if (el) {
+      el.classList.add('sel');
+      el.setAttribute('aria-selected', 'true');
+      var r = ui.results, top = el.offsetTop, bottom = top + el.offsetHeight;
+      if (top < r.scrollTop + 4) r.scrollTop = Math.max(0, top - 30);
+      else if (bottom > r.scrollTop + r.clientHeight - 4) r.scrollTop = bottom - r.clientHeight + 6;
+    }
+  }
+  function move(delta) {
+    if (S.items.length === 0) return;
+    var step = delta > 0 ? 1 : -1, remaining = Math.abs(delta), cur = S.selected, good = S.selected;
+    while (remaining > 0) {
+      cur += step;
+      if (cur < 0 || cur >= S.items.length) break;
+      if (S.items[cur].kind !== 'header') { good = cur; remaining--; }
+    }
+    if (good >= 0 && good !== S.selected) select(good);
+    if (good === firstSelectable()) ui.results.scrollTop = 0;
+  }
+  function current() { return S.selected >= 0 ? S.items[S.selected] : null; }
+
+  // ------------------------------------------------------------ actions
+  function execute(mode) {
+    if (S.timer) runQuery();
+    var it = current();
+    if (!it) return;
+    if (it.kind === 'command') { runCommand(it); return; }
+    openItem(it, mode);
+  }
+
+  function nodeFor(it) {
+    var idx = S.renderedIndex || S.index;
+    if (it.node >= 0 && idx === S.index) return it.node;
+    return S.engine.nodeOf(S.index, it.path);
+  }
+
+  function openItem(it, mode) {
+    var node = nodeFor(it);
+    if (node < 0) { toast('デモではインデックスにない場所は開けません (Windows 版ではそのまま開きます)'); return; }
+    var idx = S.index, isDir = idx.isDir(node), path = idx.fullPath(node);
+    hideLauncher();
+    S.usage.record(path, isDir);
+    saveUsage();
+    if (isDir && mode !== 'reveal') {
+      exNavigate(node, -1, true);
+      deskToast(mode === 'new' ? '新しいウィンドウで開きました: ' + it.title : 'エクスプローラーが「' + it.title + '」へ移動しました');
+    } else {
+      var parent = idx.parent[node];
+      exNavigate(parent >= 0 ? parent : node, node, true);
+      deskToast(isDir || mode === 'reveal' ? '場所を開いて選択しました: ' + it.title : 'Windows 版ではここで「' + it.title + '」が開きます');
+    }
+  }
+
+  function runCommand(it) {
+    var a = it.action || '';
+    if (a.indexOf('addRoot:') === 0) { toast('デモでは検索対象を追加できません (Windows 版では登録してスキャンします)'); return; }
+    switch (a) {
+      case 'rescan': simulateScan(); break;
+      case 'loadFolder': ui.dirInput.click(); break;
+      case 'pickRoot': ui.dirInput.click(); break;
+      case 'sample': useSample(); break;
+      case 'settings': showIni(); break;
+      case 'startup': toast('Windows 版ではスタートアップに登録されます (デモでは何もしません)'); break;
+      case 'clearHistory': S.usage.clearHistory(); saveUsage(); toast('履歴をクリアしました'); ui.q.value = ''; runQuery(); break;
+      case 'clearPins': S.usage.pins = []; S.usage.version++; saveUsage(); toast('ピン留めをすべて外しました'); ui.q.value = ''; runQuery(); break;
+    }
+  }
+
+  function scopeInto() {
+    var it = current();
+    if (!it || it.kind !== 'entry') return;
+    var idx = S.index, node = nodeFor(it);
+    if (node < 0) { toast('このフォルダはインデックスにありません'); return; }
+    if (!idx.isDir(node)) node = idx.parent[node];
+    if (node >= 0) setScope(node, -1);
+  }
+  function setScope(node, selectAfter) {
+    S.scope = node;
+    S.scopeIndex = S.index;
+    S.scopePath = S.index.fullPath(node);
+    S.pendingSelectNode = selectAfter;
+    renderChips();
+    ui.q.value = '';
+    runQuery();
+  }
+  function scopeUp() {
+    if (S.scope < 0) return;
+    var from = S.scope, p = S.scopeIndex.parent[S.scope];
+    if (p >= 0) setScope(p, from);
+    else { clearScope(); S.pendingSelectNode = from; ui.q.value = ''; runQuery(); }
+  }
+  function clearScope() {
+    S.scope = -1; S.scopeIndex = null; S.scopePath = null;
+    renderChips();
+  }
+  function renderChips() {
+    if (S.scope < 0) {
+      ui.chips.innerHTML = '';
+      ui.q.placeholder = 'フォルダ名・ファイル名で検索  (スペースで絞り込み / パスの貼り付けも OK)';
+      return;
+    }
+    ui.chips.innerHTML = '<span class="chip" title="' + esc(S.scopePath) + '">' + FOLDER_SVG + '<span>' + esc(FJ.prettyPath(S.scopePath, 34)) + '</span></span>';
+    ui.q.placeholder = 'このフォルダの中を検索  (Backspace で上へ)';
+  }
+
+  function togglePin() {
+    var it = current();
+    if (!it || it.kind !== 'entry' || !it.path) return;
+    var pinned = S.usage.togglePin(it.path, it.isDir);
+    saveUsage();
+    it.pinned = pinned;
+    var el = document.getElementById('r' + S.selected);
+    if (el) {
+      var rt = el.querySelector('.rt');
+      var star = rt.querySelector('svg');
+      if (pinned && !star) rt.insertAdjacentHTML('afterbegin', STAR);
+      if (!pinned && star) star.remove();
+    }
+    toast(pinned ? 'ピン留めしました (何も入力していない時に一番上に出ます)' : 'ピン留めを外しました');
+  }
+
+  function copyPath() {
+    var it = current();
+    if (!it || !it.path) return;
+    var done = function () { toast('パスをコピーしました  ' + it.path); };
+    var fail = function () { toast('コピーできませんでした。パス: ' + it.path); };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(it.path).then(done, fail);
+      else fail();
+    } catch (e) { fail(); }
+  }
+
+  function toast(msg) {
+    ui.toast.textContent = msg;
+    ui.toast.hidden = false;
+    ui.status.hidden = true;
+    clearTimeout(S.toastTimer);
+    S.toastTimer = setTimeout(function () { ui.toast.hidden = true; ui.status.hidden = false; }, 2600);
+    if (!S.open) deskToast(msg);
+  }
+  function deskToast(msg) {
+    ui.deskToast.textContent = msg;
+    ui.deskToast.hidden = false;
+    clearTimeout(S.deskToastTimer);
+    S.deskToastTimer = setTimeout(function () { ui.deskToast.hidden = true; }, 2800);
+  }
+
+  function setStatus() {
+    var n = S.index ? S.index.count : 0;
+    ui.frame.classList.toggle('scanning', S.scanning);
+    ui.status.classList.toggle('ready', !S.scanning && n > 0);
+    if (S.scanning) { ui.statusText.textContent = 'スキャン中…  ' + S.scanCount.toLocaleString('ja-JP') + ' 件'; return; }
+    var d = new Date(S.builtAt || Date.now());
+    ui.statusText.textContent = n.toLocaleString('ja-JP') + ' 件  ·  ' + (d.getMonth() + 1) + '/' + d.getDate() + ' '
+      + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ' 更新';
+  }
+  function simulateScan() {
+    if (S.scanning) return;
+    S.scanning = true;
+    var total = S.index.count, t0 = performance.now();
+    toast('スキャンを開始しました。終わるまでは前回のインデックスで検索できます');
+    (function step() {
+      var p = Math.min(1, (performance.now() - t0) / 1800);
+      S.scanCount = Math.floor(total * (1 - Math.pow(1 - p, 2)));
+      setStatus();
+      if (p < 1) { requestAnimationFrame(step); return; }
+      S.scanning = false;
+      S.builtAt = Date.now();
+      setStatus();
+    })();
+  }
+
+  function showIni() {
+    var roots = S.index.roots.map(function (r) { return S.dataset === 'sample' ? r : '\\\\fileserver\\share'; }).join('\n');
+    $('iniText').textContent = [
+      '; FolderJump 設定ファイル  (保存すると自動で反映されます)', '',
+      '[General]', '; 呼び出しキー (例: Ctrl+Alt+Space / Ctrl+Shift+J / Alt+Q)', 'Hotkey = Ctrl+Alt+Space', '',
+      '; ファイルも検索対象にする (false でフォルダだけ。軽くなります)', 'IncludeFiles = true', '',
+      '; インデックスを自動で作り直す間隔 (時間)', 'RescanHours = 12', '',
+      '; スキャンの同時実行数。サーバーに遠慮したいときは小さく', 'ScanThreads = 8', '',
+      '; 直前に使っていたエクスプローラー(タブ)をそのまま移動させる', 'ReuseExplorer = true', '',
+      '; エクスプローラーで普通に開いたフォルダも「よく使う」として学習する', 'LearnFromExplorer = true', '',
+      '[Roots]', '; 検索対象のフォルダ。1 行に 1 つ', roots, '',
+      '[Exclude]', '; スキャンしない名前。* と ? が使えます', '$RECYCLE.BIN', '~snapshot', 'Thumbs.db', '~$*', '*.tmp'
+    ].join('\n');
+    $('iniDialog').showModal();
+  }
+
+  // ------------------------------------------------------------ explorer (mock)
+  function exNavigate(node, selectNode, fromLauncher) {
+    if (node !== S.ex.node) S.ex.back.push(S.ex.node);
+    S.ex.node = node;
+    S.ex.selected = selectNode;
+    if (!fromLauncher) {
+      // Windows 版の「エクスプローラーで開いたフォルダも学習」と同じ
+      S.usage.record(S.index.fullPath(node), true);
+      saveUsage();
+    }
+    exRender();
+    if (fromLauncher) {
+      ui.explorer.classList.remove('jumped');
+      void ui.explorer.offsetWidth;
+      ui.explorer.classList.add('jumped');
+      setTimeout(function () { ui.explorer.classList.remove('jumped'); }, 900);
+    }
+  }
+
+  function exRender() {
+    var idx = S.index, node = S.ex.node;
+    var chain = [];
+    for (var c = node; c >= 0; c = idx.parent[c]) chain.unshift(c);
+    var segs = [];
+    chain.forEach(function (n, i) {
+      if (i > 0) segs.push('<span class="chev">›</span>');
+      var label = idx.parent[n] < 0 ? idx.name[n].replace(/^\\\\/, '').replace(/\\/g, ' › ') : idx.name[n];
+      segs.push('<button class="seg" type="button" data-node="' + n + '">' + esc(label) + '</button>');
+    });
+    ui.address.innerHTML = segs.join('');
+    ui.address.scrollLeft = ui.address.scrollWidth;
+    ui.tabTitle.textContent = FJ.lastSegment(idx.name[node]);
+    ui.tabIcon.innerHTML = '<span style="display:inline-block;width:16px;height:16px;vertical-align:-3px">' + FOLDER_SVG + '</span>';
+    var kids = idx.children(node, 600);
+    var rows = kids.map(function (k) {
+      var dir = idx.isDir(k), name = idx.name[k], d = idx.mtime[k] ? new Date(idx.mtime[k]) : null;
+      var date = d ? d.getFullYear() + '/' + ('0' + (d.getMonth() + 1)).slice(-2) + '/' + ('0' + d.getDate()).slice(-2) + ' ' + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) : '';
+      var type = dir ? 'ファイル フォルダー' : (TYPES[ext(name)] || (ext(name) ? ext(name).toUpperCase() + ' ファイル' : 'ファイル'));
+      return '<div class="ex-row' + (k === S.ex.selected ? ' sel' : '') + '" data-node="' + k + '"><span class="nm">' + (dir ? FOLDER_SVG : fileSvg(name))
+        + '<span>' + esc(name) + '</span></span><span class="dt">' + date + '</span><span class="ty">' + esc(type) + '</span></div>';
+    });
+    ui.exList.innerHTML = rows.length ? rows.join('') : '<div class="ex-empty">このフォルダーは空です。</div>';
+    ui.exStatus.textContent = kids.length + ' 個の項目' + (S.ex.selected >= 0 ? '   1 個の項目を選択' : '');
+    ui.exBack.disabled = S.ex.back.length === 0;
+    ui.exUp.disabled = idx.parent[node] < 0;
+    var sel = ui.exList.querySelector('.ex-row.sel');
+    if (sel) sel.scrollIntoView({ block: 'center' });
+    else ui.exList.scrollTop = 0;
+  }
+
+  ui.exList.addEventListener('click', function (e) {
+    var row = e.target.closest('.ex-row');
+    if (!row) return;
+    S.ex.selected = +row.dataset.node;
+    Array.prototype.forEach.call(ui.exList.querySelectorAll('.ex-row.sel'), function (r) { r.classList.remove('sel'); });
+    row.classList.add('sel');
+    ui.exStatus.textContent = ui.exList.querySelectorAll('.ex-row').length + ' 個の項目   1 個の項目を選択';
+  });
+  ui.exList.addEventListener('dblclick', function (e) {
+    var row = e.target.closest('.ex-row');
+    if (!row) return;
+    var n = +row.dataset.node;
+    if (S.index.isDir(n)) exNavigate(n, -1, false);
+    else deskToast('Windows 版ではここで「' + S.index.name[n] + '」が開きます');
+  });
+  ui.address.addEventListener('click', function (e) {
+    var seg = e.target.closest('.seg');
+    if (seg) exNavigate(+seg.dataset.node, -1, false);
+  });
+  ui.exBack.addEventListener('click', function () {
+    if (!S.ex.back.length) return;
+    S.ex.node = S.ex.back.pop();
+    S.ex.selected = -1;
+    exRender();
+  });
+  ui.exUp.addEventListener('click', function () {
+    var p = S.index.parent[S.ex.node];
+    if (p >= 0) exNavigate(p, S.ex.node, false);
+  });
+
+  // ------------------------------------------------------------ events
+  ui.q.addEventListener('input', schedule);
+  ui.q.addEventListener('keydown', function (e) {
+    if (e.isComposing || e.keyCode === 229) return; // 日本語入力の変換中は触らない
+    var mod = e.ctrlKey || e.metaKey;
+    var empty = ui.q.value.length === 0;
+    switch (e.key) {
+      case 'Escape': hideLauncher(); break;
+      case 'ArrowDown': move(1); break;
+      case 'ArrowUp': move(-1); break;
+      case 'PageDown': move(8); break;
+      case 'PageUp': move(-8); break;
+      case 'Enter': execute(e.shiftKey ? 'reveal' : mod ? 'new' : 'open'); break;
+      case 'Tab': if (e.shiftKey) scopeUp(); else scopeInto(); break;
+      case 'Backspace': if (empty && S.scope >= 0) scopeUp(); else return; break;
+      case 'ArrowRight': if (empty) scopeInto(); else return; break;
+      case 'ArrowLeft': if (empty && S.scope >= 0) scopeUp(); else return; break;
+      case 'd': case 'D': if (mod) togglePin(); else return; break;
+      case 'c': case 'C':
+        if (mod && (e.shiftKey || ui.q.selectionStart === ui.q.selectionEnd)) copyPath(); else return;
+        break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+  ui.results.addEventListener('mousedown', function (e) { e.preventDefault(); ui.q.focus(); });
+  ui.results.addEventListener('click', function (e) {
+    var row = e.target.closest('.row');
+    if (!row) return;
+    var i = +row.dataset.i;
+    if (i === S.selected) execute('open'); else select(i);
+  });
+  document.querySelector('.hints').addEventListener('click', function (e) {
+    var b = e.target.closest('.hint');
+    if (!b) return;
+    var act = b.dataset.act;
+    if (act === 'open') execute('open');
+    else if (act === 'reveal') execute('reveal');
+    else if (act === 'into') scopeInto();
+    else if (act === 'pin') togglePin();
+    else if (act === 'copy') copyPath();
+    else if (act === 'cmd') { ui.q.value = '>'; runQuery(); }
+    if (act !== 'open' && act !== 'reveal' && S.open) ui.q.focus();
+  });
+  ui.desk.addEventListener('mousedown', function (e) {
+    if (S.open && !ui.launcher.contains(e.target) && !ui.summon.contains(e.target)) hideLauncher();
+  });
+  ui.summon.addEventListener('click', function () { showLauncher(); });
+  document.addEventListener('keydown', function (e) {
+    if ((e.key === 'k' || e.key === 'K') && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (S.open && document.activeElement === ui.q) hideLauncher(); else showLauncher();
+      return;
+    }
+    var t = e.target, typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (e.key === '/' && !typing && !$('iniDialog').open) { e.preventDefault(); showLauncher(); }
+  });
+  $('tries').addEventListener('click', function (e) {
+    var b = e.target.closest('.try');
+    if (!b) return;
+    showLauncher(b.dataset.q);
+    if (window.matchMedia('(max-width: 760px)').matches) ui.desk.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  $('iniClose').addEventListener('click', function () { $('iniDialog').close(); ui.q.focus(); });
+
+  function useSample() {
+    var idx = FJ.buildSampleServer();
+    useIndex(idx, 'sample', 'サンプル: <b>架空の会社のファイルサーバー</b> (' + idx.count.toLocaleString('ja-JP') + ' 件)');
+  }
+  ui.loadBtn.addEventListener('click', function () { ui.dirInput.click(); });
+  ui.sampleBtn.addEventListener('click', useSample);
+  ui.dirInput.addEventListener('change', function () {
+    var files = ui.dirInput.files;
+    if (!files || files.length === 0) return;
+    var idx = FJ.buildFromFiles(files);
+    ui.dirInput.value = '';
+    if (idx.count === 0) { toast('読み込めるファイルがありませんでした'); return; }
+    var name = idx.roots[0];
+    useIndex(idx, 'folder:' + name, '読み込んだフォルダ: <b>' + esc(name) + '</b> (' + idx.count.toLocaleString('ja-JP') + ' 件)');
+    showLauncher('');
+    toast('「' + name + '」を読み込みました。名前の一部を入力してみてください');
+  });
+
+  $('summonKey').textContent = MOD + ' K';
+  $('openKey').textContent = MOD;
+  Array.prototype.forEach.call(document.querySelectorAll('.hint .k'), function (k) {
+    k.textContent = k.textContent.replace('Ctrl', MOD);
+  });
+
+  useSample();
+  ui.q.focus({ preventScroll: true });
+})();
+</script>
